@@ -67,11 +67,20 @@ jobs:
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
 
+          # Go 的 GOARCH 与 clang 的 -arch 名称不同
+          clang_arch() {
+            case "$1" in
+              amd64) echo x86_64 ;;
+              *) echo "$1" ;;
+            esac
+          }
+
           for arch in amd64 arm64; do
             d="out/$arch"
+            ca="$(clang_arch "$arch")"
             mkdir -p "$d"
             for cmd in clowder clowderd; do
-              CGO_CFLAGS="-arch $arch" CGO_LDFLAGS="-arch $arch" CC=clang \
+              CGO_CFLAGS="-arch $ca" CGO_LDFLAGS="-arch $ca" CC=clang \
                 GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" \
                 -o "$d/$cmd" "./cmd/$cmd"
             done
@@ -99,7 +108,7 @@ jobs:
           PLIST
 
             ( cd "$d" && zip -qry "clowder-darwin-$arch.zip" Clowder.app )
-            ( cd out && sha256sum "$arch/clowder-darwin-$arch.zip" \
+            ( cd out && shasum -a 256 "$arch/clowder-darwin-$arch.zip" \
                 | sed "s|$arch/||" > "clowder-darwin-$arch.sha256" )
           done
 
