@@ -108,8 +108,9 @@ jobs:
           PLIST
 
             ( cd "$d" && zip -qry "clowder-darwin-$arch.zip" Clowder.app )
-            ( cd out && shasum -a 256 "$arch/clowder-darwin-$arch.zip" \
-                | sed "s|$arch/||" > "clowder-darwin-$arch.sha256" )
+            mv "$d/clowder-darwin-$arch.zip" out/
+            ( cd out && shasum -a 256 "clowder-darwin-$arch.zip" \
+                > "clowder-darwin-$arch.sha256" )
           done
 
           ls -lh out/*.zip out/*.sha256
