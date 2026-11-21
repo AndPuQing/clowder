@@ -86,6 +86,18 @@ The tunnel carries the bytes; the host does the routing.
 
 > The interface follows your system language: English and Simplified Chinese are included.
 
+## Settings
+
+![Settings](docs/images/settings.png)
+
+- **Language** — follow the system, or pin English or Simplified Chinese
+- **Hide to tray when the window closes** — off means closing the window quits
+- **Local SOCKS5 port** — where the peer-side proxy listens (default 1080)
+- **DERP map URL** — point at your own relay list instead of the public one
+- **Preferred relay region ID** — pin a region instead of picking the nearest
+
+Changes to the relay settings apply to the next connection you start.
+
 ## It keeps running when you close the window
 
 Closing the window hides Clowder to the tray; the tunnels stay up. The tray menu shows every machine and its state, and lets you start or stop each one without reopening the window. **Quit** from the tray to exit for real.

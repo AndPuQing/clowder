@@ -43,5 +43,14 @@
   "opt.allowProxy": "Let the peer reach my network",
   "opt.socks": "Local SOCKS5 proxy",
   "opt.allowedClients": "Only these client keys (optional)",
-  "status.socksOn": "SOCKS5 listening on {addr}"
+  "status.socksOn": "SOCKS5 listening on {addr}",
+  "settings.title": "Settings",
+  "settings.language": "Language",
+  "settings.langAuto": "System",
+  "settings.closeToTray": "Hide to tray when the window closes",
+  "settings.socksPort": "Local SOCKS5 port",
+  "settings.derp": "DERP map URL (empty for the default)",
+  "settings.derpRegion": "Preferred relay region ID (0 = auto)",
+  "nav.settings": "Settings",
+  "nav.back": "Back"
 }

@@ -38,6 +38,7 @@ if [ "${1:-}" = "gui" ]; then
     -e CLOWDER_AUTOSTART \
     -e CLOWDER_MOCKUP \
     -e CLOWDER_TAB \
+    -e CLOWDER_PAGE \
     -e CLOWDER_DEMO \
     -e LANG \
     -e LC_ALL \

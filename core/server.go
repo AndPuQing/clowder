@@ -11,6 +11,7 @@ import (
 
 	"github.com/tailscale/tailcat"
 	"go4.org/mem"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
 
@@ -47,6 +48,12 @@ type ServerOptions struct {
 
 	// AllowedClients 是允许连接的客户端公钥（nodekey:...），为空则不限制。
 	AllowedClients []string
+
+	// DERPMapURL 覆盖默认中继列表地址。
+	DERPMapURL string
+
+	// RegionID 指定优先使用的中继区域。
+	RegionID int
 }
 
 // StartServer 启动服务端并连上 DERP 中继。
@@ -69,6 +76,13 @@ func StartServer(opts ServerOptions) (*Server, error) {
 				pipeToTarget(c, target)
 			}
 		},
+	}
+
+	if opts.DERPMapURL != "" {
+		ts.DERPMapURL = opts.DERPMapURL
+	}
+	if opts.RegionID > 0 {
+		ts.RegionID = tailcfg.DERPRegionID(opts.RegionID)
 	}
 
 	if opts.UDP {

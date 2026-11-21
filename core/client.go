@@ -31,6 +31,9 @@ type ClientOptions struct {
 	// KeyName 指定持久化密钥的名字。设置后客户端公钥固定，
 	// 服务端才能用 AllowedClients 做白名单。
 	KeyName string
+
+	// DERPMapURL 覆盖默认中继列表地址。
+	DERPMapURL string
 }
 
 // PublicKeyOf 返回指定名字的持久化密钥对应的公钥。
@@ -47,6 +50,9 @@ func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 	c, err := NewClient(opts.Addr)
 	if err != nil {
 		return nil, err
+	}
+	if opts.DERPMapURL != "" {
+		c.tc.DERPMapURL = opts.DERPMapURL
 	}
 	if opts.KeyName != "" {
 		k, _, err := LoadOrCreateKey(opts.KeyName)

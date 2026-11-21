@@ -43,5 +43,14 @@
   "opt.allowProxy": "允许对方访问我的内网",
   "opt.socks": "本地 SOCKS5 代理",
   "opt.allowedClients": "只允许这些客户端公钥（可留空）",
-  "status.socksOn": "SOCKS5 已开在 {addr}"
+  "status.socksOn": "SOCKS5 已开在 {addr}",
+  "settings.title": "设置",
+  "settings.language": "界面语言",
+  "settings.langAuto": "跟随系统",
+  "settings.closeToTray": "关窗口时隐藏到托盘",
+  "settings.socksPort": "本地 SOCKS5 端口",
+  "settings.derp": "DERP 中继列表地址（留空用默认）",
+  "settings.derpRegion": "优先中继区域 ID（0 为自动）",
+  "nav.settings": "设置",
+  "nav.back": "返回"
 }

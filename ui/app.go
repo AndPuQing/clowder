@@ -71,14 +71,29 @@ type App struct {
 	quitting bool
 
 	allowedDraft map[string]*string
+
+	settings     core.Settings
+	showSettings bool
+	socksPortIn  string
+	derpIn       string
+	derpRegionIn string
 }
 
 // New 读取设备清单并构造界面状态。
 func New() *App {
 	initI18n()
 
+	settings := core.LoadSettings()
+	if settings.Language != "" {
+		mygo.App.SetLocale(settings.Language)
+	}
+
 	a := &App{
-		rt: map[string]*runtime{},
+		rt:           map[string]*runtime{},
+		settings:     settings,
+		socksPortIn:  fmt.Sprint(settings.SocksPort),
+		derpIn:       settings.DERPMapURL,
+		derpRegionIn: fmt.Sprint(settings.DERPMapRegion),
 		theme: func() *myui.Theme {
 			t := myui.DarkTheme().WithAccent(myui.Hex(colGold))
 			t.Radius = radControl // 让按钮、输入框、开关统一成同一种圆角
@@ -121,6 +136,9 @@ func newDevice(role, name string) core.Device {
 
 // Run 启动主循环。
 func (a *App) Run() error {
+	if os.Getenv("CLOWDER_PAGE") == "settings" {
+		a.showSettings = true
+	}
 	if os.Getenv("CLOWDER_TAB") == "client" {
 		// 兼容旧的调试开关：选中第一台 peer 设备
 		for _, d := range a.devices {
@@ -131,6 +149,11 @@ func (a *App) Run() error {
 		}
 	}
 	mygo.App.WhenReady(func() {
+		a.mu.Lock()
+		lang := a.settings.Language
+		a.mu.Unlock()
+		mygo.App.SetLocale(lang)
+
 		a.window = mygo.NewWindow(mygo.WindowOptions{
 			Title:         "Clowder",
 			Width:         1000,
@@ -145,8 +168,11 @@ func (a *App) Run() error {
 			a.mu.Lock()
 			quitting := a.quitting
 			a.mu.Unlock()
-			if quitting || a.tray == nil {
-				return // 没有托盘就正常退出
+			a.mu.Lock()
+			hide := a.settings.CloseToTray
+			a.mu.Unlock()
+			if quitting || a.tray == nil || !hide {
+				return // 没有托盘或没开这项，就正常退出
 			}
 			e.PreventDefault()
 			a.window.Hide()
@@ -191,6 +217,11 @@ func (a *App) view(c *myui.Context) {
 
 		myui.Column(c).Grow(1).Fill().Padding(34, 30).Gap(0).Children(func() {
 			myui.Row(c).Height(18).FillWidth().DragWindow()
+			if a.showSettings {
+				a.settingsPane(c)
+				return
+			}
+
 			dev, ok := findDevice(devices, sel)
 			if !ok {
 				myui.Row(c).Grow(1)
@@ -269,6 +300,19 @@ func (a *App) rail(c *myui.Context, devices []core.Device, sel string) {
 		}
 		addRow(T("nav.host"), core.RoleHost)
 		addRow(T("nav.join"), core.RolePeer)
+
+		settingsRow := myui.Row(c).Gap(8).Padding(14, 0, 0, 0).Children(func() {
+			myui.Text(c, "⚙").FontSize(12).TextColor(dim)
+			myui.Text(c, T("nav.settings")).FontSize(12.5).
+				TextColor(myui.Hex("#C6D2CE"))
+		})
+		settingsRow.Cursor(myui.CursorPointer)
+		settingsRow.OnClick(func() {
+			a.mu.Lock()
+			a.showSettings = true
+			a.mu.Unlock()
+			a.refresh()
+		})
 	})
 }
 
@@ -823,7 +867,13 @@ func (a *App) startHost(id string) {
 		return
 	}
 
+	a.mu.Lock()
+	st := a.settings
+	a.mu.Unlock()
+
 	opts := core.ServerOptions{
+		DERPMapURL:     st.DERPMapURL,
+		RegionID:       st.DERPMapRegion,
 		Targets:        targets,
 		UDP:            dev.UDP,
 		AllowProxy:     dev.AllowProxy,
@@ -908,8 +958,12 @@ func (a *App) startPeer(id string) {
 		parsed = append(parsed, [2]uint16{local, remote})
 	}
 
+	a.mu.Lock()
+	st := a.settings
+	a.mu.Unlock()
+
 	go func() {
-		c, err := core.NewClient(addr)
+		c, err := core.NewClientWithOptions(core.ClientOptions{Addr: addr, DERPMapURL: st.DERPMapURL})
 		if err != nil {
 			a.finishPeer(id, nil, 0, err)
 			return
@@ -936,7 +990,7 @@ func (a *App) startPeer(id string) {
 		}
 
 		if dev.Socks {
-			if _, err := c.SOCKS5("127.0.0.1:1080"); err != nil {
+			if _, err := c.SOCKS5(fmt.Sprintf("127.0.0.1:%d", st.SocksPort)); err != nil {
 				_ = c.Close()
 				a.finishPeer(id, nil, lat, fmt.Errorf("SOCKS5 启动失败：%w", err))
 				return
@@ -1123,4 +1177,125 @@ func hardWrap(s string, n int) string {
 		b.WriteString(string(r[i:end]))
 	}
 	return b.String()
+}
+
+// settingsPane 应用级设置。
+func (a *App) settingsPane(c *myui.Context) {
+	cream := myui.Hex(colCream)
+	dim := myui.Hex(colDim)
+
+	a.mu.Lock()
+	st := a.settings
+	a.mu.Unlock()
+
+	myui.Row(c).Gap(12).Children(func() {
+		myui.Text(c, T("settings.title")).Font(fontUI).FontSize(24).
+			FontWeight(700).TextColor(cream)
+		myui.Row(c).Grow(1)
+		myui.Toolbar(c, func() {
+			if myui.Button(c, T("nav.back")).Clicked() {
+				a.mu.Lock()
+				a.showSettings = false
+				a.mu.Unlock()
+				a.refresh()
+			}
+		})
+	})
+
+	myui.Column(c).Padding(14, 0).Children(func() {
+		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
+	})
+
+	myui.Column(c).Gap(20).Width(520).Padding(22, 0).Children(func() {
+		// 语言
+		myui.Column(c).Gap(8).Children(func() {
+			myui.Text(c, T("settings.language")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+			myui.Toolbar(c, func() {
+				langs := []struct{ label, tag string }{
+					{T("settings.langAuto"), ""},
+					{"English", "en"},
+					{"简体中文", "zh-Hans"},
+				}
+				for _, l := range langs {
+					l := l
+					mark := ""
+					if st.Language == l.tag {
+						mark = "✓ "
+					}
+					if myui.Button(c, mark+l.label).Clicked() {
+						a.applyLanguage(l.tag)
+					}
+				}
+			})
+		})
+
+		// 关窗行为
+		myui.Row(c).Gap(10).Children(func() {
+			myui.Switch(c, a.closeToTrayPtr())
+			myui.Text(c, T("settings.closeToTray")).FontSize(12.5).TextColor(cream)
+		})
+
+		// SOCKS 端口
+		myui.Column(c).Gap(6).Width(220).Children(func() {
+			myui.Text(c, T("settings.socksPort")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+			if myui.TextInput(c, &a.socksPortIn).Changed() {
+				a.saveNumericSettings()
+			}
+		})
+
+		// DERP
+		myui.Column(c).Gap(6).Width(460).Children(func() {
+			myui.Text(c, T("settings.derp")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+			if myui.TextInput(c, &a.derpIn).Changed() {
+				a.saveNumericSettings()
+			}
+		})
+
+		myui.Column(c).Gap(6).Width(220).Children(func() {
+			myui.Text(c, T("settings.derpRegion")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+			if myui.TextInput(c, &a.derpRegionIn).Changed() {
+				a.saveNumericSettings()
+			}
+		})
+	})
+}
+
+// applyLanguage 切换界面语言并记住。
+func (a *App) applyLanguage(tag string) {
+	a.mu.Lock()
+	a.settings.Language = tag
+	st := a.settings
+	a.mu.Unlock()
+
+	_ = core.SaveSettings(st)
+	mygo.RunOnMain(func() { mygo.App.SetLocale(tag) })
+	a.refresh()
+}
+
+// closeToTrayPtr 返回设置里开关的指针。
+func (a *App) closeToTrayPtr() *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return &a.settings.CloseToTray
+}
+
+// saveNumericSettings 把文本框里的数字与地址写回配置。
+func (a *App) saveNumericSettings() {
+	a.mu.Lock()
+	if n, err := strconv.Atoi(strings.TrimSpace(a.socksPortIn)); err == nil && n > 0 && n < 65536 {
+		a.settings.SocksPort = n
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(a.derpRegionIn)); err == nil && n >= 0 {
+		a.settings.DERPMapRegion = n
+	}
+	a.settings.DERPMapURL = strings.TrimSpace(a.derpIn)
+	st := a.settings
+	a.mu.Unlock()
+
+	_ = core.SaveSettings(st)
+	a.refresh()
 }
