@@ -88,3 +88,22 @@ applied to a native desktop app.
 - Body copy is capped at a readable measure; a label that needs more is a
   paragraph, and belongs elsewhere.
 - Do not animate `all`; list the properties. Do not animate layout in place.
+
+## Motion
+
+Motion is state feedback, never decoration. The rules come from the
+`emil-design-eng` skill, translated to MyGo's `Transition` and `Motion`:
+
+- A panel that appears or disappears gets a 160 ms `ease-out` entry and a
+  110 ms exit. It starts at `opacity: 0`, 6 DIP below its place and
+  `scale(0.99)`, never at `scale(0)`.
+- Press and hover feedback is 100–160 ms. The button scales to 0.97 on press;
+  colours and shadows transition over 120 ms.
+- Nothing animates a keyboard-initiated action. Changing a switch, typing in
+  a field, or sending a command happens instantly.
+- Animate opacity and transform only. Do not animate layout in place, and do
+  not use `transition: all` equivalents.
+- Icon-only controls carry a tooltip with their action; MyGo drops the delay
+  once a tip has shown, so moving along a row stays fast.
+- Reduced motion is the platform's call: MyGo's transition honours it, and the
+  app adds no motion of its own.

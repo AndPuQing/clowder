@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	myui "github.com/egoist/mygo/ui"
 )
 
@@ -38,7 +40,13 @@ const (
 
 // actionButton is an icon-and-label button. Callers check Clicked as usual.
 func actionButton(c *myui.Context, style btnStyle, iconName, label string) myui.Element {
-	b := myui.ButtonBase(c).Padding(7, 11).Radius(radControl).Gap(7).Shrink(0)
+	b := myui.ButtonBase(c).Padding(7, 11).Radius(radControl).Gap(7).Shrink(0).
+		Transition(myui.ElementTransition{
+			Duration: 120 * time.Millisecond,
+			Ease:     myui.EaseOut,
+			Colors:   true,
+			Shadows:  true,
+		})
 
 	base := myui.Hex(colPanel)
 	hover := myui.Hex(colPanelHi)
@@ -77,9 +85,18 @@ func actionButton(c *myui.Context, style btnStyle, iconName, label string) myui.
 	return b
 }
 
-// iconButton is a square control with only an icon.
-func iconButton(c *myui.Context, name string, col myui.Color) myui.Element {
-	b := myui.ButtonBase(c).Size(30, 30).Center().Radius(radControl).Shrink(0)
+// iconButton is a square control with only an icon. It shows label as its
+// tooltip and its accessible name; MyGo drops the delay once another tip
+// has shown, so moving along a row of them stays fast.
+func iconButton(c *myui.Context, name, label string, col myui.Color) myui.Element {
+	b := myui.ButtonBase(c).Size(30, 30).Center().Radius(radControl).Shrink(0).
+		Tooltip(label).Label(label).
+		Transition(myui.ElementTransition{
+			Duration: 120 * time.Millisecond,
+			Ease:     myui.EaseOut,
+			Colors:   true,
+			Shadows:  true,
+		})
 	switch {
 	case b.Pressed():
 		b.Background(myui.Hex(colLine))
@@ -159,6 +176,19 @@ func headerTile(c *myui.Context, name string, fg myui.Color) {
 	tile.Children(func() { iconEl(c, name, 22, fg) })
 }
 
+// appear gives a panel that comes and goes a short entry and a faster
+// exit: a state change should not look like a cut. It starts near its
+// place, not from nothing. Key identifies it among its siblings.
+func appear(key string, e myui.Element) myui.Element {
+	return e.Key(key).Transition(myui.ElementTransition{
+		Duration:     160 * time.Millisecond,
+		Ease:         myui.EaseOut,
+		ExitDuration: 110 * time.Millisecond,
+		Enter:        &myui.Motion{Y: 6, Opacity: 0, Scale: 0.99},
+		Exit:         &myui.Motion{Y: 4, Opacity: 0, Scale: 0.99},
+	})
+}
+
 // notice is an inline banner for an error or a warning.
 func notice(c *myui.Context, name, msg string, col myui.Color) {
 	n := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).Padding(10, 12).
@@ -168,12 +198,18 @@ func notice(c *myui.Context, name, msg string, col myui.Color) {
 		iconEl(c, name, 15, col)
 		myui.Text(c, msg).FontSize(12).TextColor(col).Grow(1)
 	})
+	appear("notice", n)
 }
 
 // segmentButton is one choice of a small segmented control. The selected
 // segment is raised; the others are quiet until hovered.
 func segmentButton(c *myui.Context, label string, selected bool) myui.Element {
-	b := myui.ButtonBase(c).Padding(4, 10).Radius(6).Shrink(0)
+	b := myui.ButtonBase(c).Padding(4, 10).Radius(6).Shrink(0).
+		Transition(myui.ElementTransition{
+			Duration: 120 * time.Millisecond,
+			Ease:     myui.EaseOut,
+			Colors:   true,
+		})
 	fg := myui.Hex(colText2)
 	switch {
 	case selected:

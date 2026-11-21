@@ -563,7 +563,7 @@ func (a *App) hostDetail(c *myui.Context, d *core.Device) {
 
 	// The address, once the host is up.
 	if running && addr != "" {
-		ticket := panel(c, 0).Padding(18)
+		ticket := appear("ticket", panel(c, 0).Padding(18))
 		ticket.Children(func() {
 			myui.Row(c).Gap(18).Children(func() {
 				box := myui.Column(c).Padding(8).Background(myui.Hex("#FFFFFF")).
@@ -601,7 +601,7 @@ func (a *App) hostDetail(c *myui.Context, d *core.Device) {
 			sectionLabel(c, T("section.ports"))
 			myui.Row(c).Grow(1)
 			if !running {
-				if iconButton(c, "plus", dim).Label(T("action.addPort")).Clicked() {
+				if iconButton(c, "plus", T("action.addPort"), dim).Clicked() {
 					a.addExpose(d.ID)
 				}
 			}
@@ -622,7 +622,7 @@ func (a *App) hostDetail(c *myui.Context, d *core.Device) {
 				}
 				myui.Row(c).Grow(1)
 				if len(d.Exposes) > 1 {
-					if iconButton(c, "x", dim).Label(T("action.removeItem")).Clicked() {
+					if iconButton(c, "x", T("action.removeItem"), dim).Clicked() {
 						a.removeExpose(d.ID, j)
 					}
 				}
@@ -722,7 +722,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 			sectionLabel(c, T("section.peerAddr"))
 			myui.Row(c).Grow(1)
 			if connected {
-				if iconButton(c, "copy", dim).Label(T("action.copy")).Clicked() {
+				if iconButton(c, "copy", T("action.copy"), dim).Clicked() {
 					_ = mygo.Clipboard.Write(transfer.TextData(d.Addr))
 					a.markCopied()
 				}
@@ -746,7 +746,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 				myui.Row(c).AlignItems(myui.Center).Children(func() {
 					iconText(c, "key", T("peer.clientKey"), 15, 11, dim)
 					myui.Row(c).Grow(1)
-					if iconButton(c, "copy", dim).Label(T("action.copyKey")).Clicked() {
+					if iconButton(c, "copy", T("action.copyKey"), dim).Clicked() {
 						_ = mygo.Clipboard.Write(transfer.TextData(key))
 						a.markCopied()
 					}
@@ -764,7 +764,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 			sectionLabel(c, T("section.mapping"))
 			myui.Row(c).Grow(1)
 			if !connected {
-				if iconButton(c, "plus", dim).Label(T("action.addMapping")).Clicked() {
+				if iconButton(c, "plus", T("action.addMapping"), dim).Clicked() {
 					a.addForward(d.ID)
 				}
 			}
@@ -785,7 +785,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 				}
 				myui.Row(c).Grow(1)
 				if len(d.Forwards) > 1 {
-					if iconButton(c, "x", dim).Label(T("action.removeItem")).Clicked() {
+					if iconButton(c, "x", T("action.removeItem"), dim).Clicked() {
 						a.removeForward(d.ID, j)
 					}
 				}
@@ -815,7 +815,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 
 	// Interactive terminal.
 	if connected && a.termOf(d.ID) != nil {
-		term := panel(c, 0).Padding(16).Gap(10)
+		term := appear("terminal", panel(c, 0).Padding(16).Gap(10))
 		term.Children(func() {
 			iconText(c, "terminal", T("term.live"), 15, 11, dim)
 			a.terminalPane(c, d.ID)
@@ -834,7 +834,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 	}
 	// Remote shell, when the tunnel is up and no interactive terminal runs.
 	if connected && a.termOf(d.ID) == nil {
-		shell := panel(c, 0).Padding(16).Gap(10)
+		shell := appear("shell", panel(c, 0).Padding(16).Gap(10))
 		shell.Children(func() {
 			iconText(c, "terminal", T("term.title"), 15, 11, dim)
 			myui.Row(c).Gap(8).Children(func() {
@@ -861,7 +861,7 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 	}
 
 	if connected && d.Socks {
-		line := myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(0, 2)
+		line := appear("socks", myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(0, 2))
 		line.Children(func() {
 			iconEl(c, "network", 14, dim)
 			myui.Text(c, "SOCKS5").FontSize(11.5).TextColor(dim)
@@ -2026,7 +2026,7 @@ func (a *App) filesPanel(c *myui.Context, id string) {
 	rt := a.runtimeSnapshot(id)
 	b := rt.browse
 
-	card := panel(c, 0).Padding(16).Gap(10)
+	card := appear("files", panel(c, 0).Padding(16).Gap(10))
 	card.Children(func() {
 		myui.Row(c).AlignItems(myui.Center).Gap(9).Children(func() {
 			iconEl(c, "folder", 15, dim)
@@ -2035,11 +2035,11 @@ func (a *App) filesPanel(c *myui.Context, id string) {
 			myui.Text(c, b.path).Font(fontMono).FontSize(10.5).
 				TextColor(text2).SingleLine()
 			if b.path != "/" {
-				if iconButton(c, "chevron-up", dim).Label(T("files.up")).Clicked() {
+				if iconButton(c, "chevron-up", T("files.up"), dim).Clicked() {
 					a.navigateFiles(id, path.Dir(b.path))
 				}
 			}
-			if iconButton(c, "refresh", dim).Label(T("files.refresh")).Clicked() {
+			if iconButton(c, "refresh", T("files.refresh"), dim).Clicked() {
 				if rt.files != nil {
 					a.navigateFiles(id, b.path)
 				} else {
@@ -2081,8 +2081,7 @@ func (a *App) filesPanel(c *myui.Context, id string) {
 					} else {
 						myui.Text(c, humanSize(e.Size)).Font(fontMono).
 							FontSize(10.5).FontFeatures("tnum").TextColor(dim)
-						if iconButton(c, "download", dim).
-							Label(T("files.download")).Clicked() {
+						if iconButton(c, "download", T("files.download"), dim).Clicked() {
 							a.downloadFile(id, b.path, e.Name)
 						}
 					}
