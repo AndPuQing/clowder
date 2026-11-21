@@ -7,3 +7,6 @@
 
 # Go
 /vendor/
+
+# libghostty 构建产物（本地）
+/.ghostty-build/
