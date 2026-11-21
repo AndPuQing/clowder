@@ -66,6 +66,9 @@ type App struct {
 	rt      map[string]*runtime
 	copied  time.Time
 	theme   *myui.Theme
+
+	tray     *mygo.Tray
+	quitting bool
 }
 
 // New 读取设备清单并构造界面状态。
@@ -133,6 +136,18 @@ func (a *App) Run() error {
 			TitleBarStyle: mygo.TitleBarHidden,
 			Content: myui.View(a.view),
 		})
+		a.setupTray()
+		a.window.OnClose(func(e *mygo.CloseEvent) {
+			a.mu.Lock()
+			quitting := a.quitting
+			a.mu.Unlock()
+			if quitting || a.tray == nil {
+				return // 没有托盘就正常退出
+			}
+			e.PreventDefault()
+			a.window.Hide()
+		})
+
 		if v := os.Getenv("CLOWDER_AUTOSTART"); v != "" {
 			go func() {
 				time.Sleep(1200 * time.Millisecond)
@@ -149,6 +164,7 @@ func (a *App) refresh() {
 		return
 	}
 	mygo.RunOnMain(func() { w.Invalidate() })
+	go a.rebuildTrayMenu()
 }
 
 // ---------------------------------------------------------------- 视图

@@ -33,6 +33,7 @@ RUN apt-get update \
         curl \
         libgtk-3-dev \
         libwebkit2gtk-4.1-dev \
+        libayatana-appindicator3-dev \
         xvfb \
         x11-utils \
         imagemagick \

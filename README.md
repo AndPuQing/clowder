@@ -12,11 +12,11 @@
 |---|---|---|
 | macOS | `clowder-darwin-arm64.zip` / `clowder-darwin-amd64.zip` | 解压后拖进「应用程序」 |
 | Windows | `clowder-windows-amd64.zip` | 需要 WebView2（Win11 自带） |
-| Linux | `clowder-linux-amd64.tar.gz` / `clowder-linux-arm64.tar.gz` | 需要 `libgtk-3-0`、`libwebkit2gtk-4.1-0` |
+| Linux | `clowder-linux-amd64.tar.gz` | 需要 `libgtk-3-0`、`libwebkit2gtk-4.1-0`、`libayatana-appindicator3-1` |
 
 ```bash
 # Linux 运行
-sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0
+sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1
 tar -xzf clowder-linux-amd64.tar.gz
 ./clowder
 ```
@@ -224,6 +224,19 @@ Go 工具链和 gocache/gomodcache 从宿主机挂载，容器无状态。
 - 粘贴地址，握手后显示往返延迟
 - 多条端口映射（`本地端口:远端端口`），可增删
 - 断开时回收本地监听
+
+## 托盘
+
+关窗口不会退出：窗口隐藏，托盘图标留着，连接继续。
+
+托盘菜单：
+
+- 显示 Clowder
+- 每台设备一行，显示名字与状态；点开是「开票 / 停止 / 连接 / 断开」
+- 退出（真正退出，会先停掉正在跑的服务与连接）
+
+图标是程序内生成的猫头剪影，不依赖外部图片资源。
+Linux 需要 `libayatana-appindicator3`，缺了会自动降级为「关窗口即退出」。
 
 ## 界面
 
