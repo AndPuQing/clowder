@@ -52,5 +52,11 @@
   "settings.derp": "DERP map URL (empty for the default)",
   "settings.derpRegion": "Preferred relay region ID (0 = auto)",
   "nav.settings": "Settings",
-  "nav.back": "Back"
+  "nav.back": "Back",
+  "opt.ssh": "Allow remote shell (SSH)",
+  "term.title": "Remote shell",
+  "term.placeholder": "Command to run, e.g. uptime",
+  "term.run": "Run",
+  "term.hint": "The other side must allow remote shell",
+  "term.empty": "No output yet"
 }

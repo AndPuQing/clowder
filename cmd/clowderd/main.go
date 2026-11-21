@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -77,6 +78,8 @@ func runServe(args []string) {
 	keyName := fs.String("key", "", "持久化密钥名（给定后地址跨重启稳定；留空则用临时密钥）")
 	udp := fs.Bool("udp", false, "同时转发 UDP")
 	allowProxy := fs.Bool("allow-proxy", false, "允许对方经本机访问其它地址（内网）")
+	sshOn := fs.Bool("ssh", false, "在隧道里开放 SSH（22 端口），对方可拿到 shell")
+	sshDir := fs.String("ssh-files", "", "同时开放 SFTP，指定可读目录")
 	var allow pairList
 	fs.Var(&allow, "allow", "允许的客户端公钥（可重复）")
 	fs.Parse(args)
@@ -103,6 +106,8 @@ func runServe(args []string) {
 		UDP:            *udp,
 		AllowProxy:     *allowProxy,
 		AllowedClients: allow.vals,
+		SSH:            *sshOn,
+		SSHFileDir:     *sshDir,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
@@ -135,6 +140,7 @@ func runDial(args []string) {
 	keyName := fs.String("key", "", "持久化密钥名（固定客户端公钥，便于服务端白名单）")
 	udp := fs.Bool("udp", false, "同时转发 UDP")
 	socks := fs.String("socks", "", "在本地起 SOCKS5 代理（如 127.0.0.1:1080）")
+	sshExec := fs.String("ssh-exec", "", "经隧道在对方机器上执行一条命令后退出")
 	fs.Parse(args)
 
 	if *addr == "" {
@@ -150,6 +156,16 @@ func runDial(args []string) {
 	defer c.Close()
 
 	fmt.Printf("本端公钥: %s\n", c.PublicKey())
+
+	if *sshExec != "" {
+		out, err := core.SSHExec(context.Background(), *addr, *sshExec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "SSH 执行失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
+	}
 
 	lat, err := c.Ping(30 * time.Second)
 	if err != nil {

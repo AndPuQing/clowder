@@ -52,5 +52,11 @@
   "settings.derp": "DERP 中继列表地址（留空用默认）",
   "settings.derpRegion": "优先中继区域 ID（0 为自动）",
   "nav.settings": "设置",
-  "nav.back": "返回"
+  "nav.back": "返回",
+  "opt.ssh": "允许远程终端（SSH）",
+  "term.title": "远程终端",
+  "term.placeholder": "要执行的命令，例如 uptime",
+  "term.run": "执行",
+  "term.hint": "对方需要打开「允许远程终端」",
+  "term.empty": "还没有输出"
 }

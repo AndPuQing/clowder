@@ -86,6 +86,14 @@ The tunnel carries the bytes; the host does the routing.
 
 > The interface follows your system language: English and Simplified Chinese are included.
 
+## Remote shell
+
+Turn on **Allow remote shell (SSH)** for a machine. After you connect to it as a peer, a **Remote shell** panel appears: type a command, press **Run**, and the host runs it and sends back the output.
+
+No `sshd` to configure, no port 22 to map, no `ssh` client to install — the session runs over the same encrypted tunnel, and tailcat's built-in SSH server handles the shell. The host's SSH host key is generated on first use under `~/.config/tailcat/ssh`.
+
+This first cut runs one command at a time. A full interactive terminal is the next step.
+
 ## Settings
 
 ![Settings](docs/images/settings.png)

@@ -38,6 +38,9 @@ type Device struct {
 	// AllowProxy 为真时允许对方经本机访问其它地址（内网）。
 	AllowProxy bool `json:"allowProxy,omitempty"`
 
+	// SSH 为真时 host 在隧道里开放 SSH（22），对方可执行命令。
+	SSH bool `json:"ssh,omitempty"`
+
 	// Socks 为真时 peer 在本地开一个 SOCKS5 代理。
 	Socks bool `json:"socks,omitempty"`
 

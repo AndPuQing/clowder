@@ -54,6 +54,15 @@ type ServerOptions struct {
 
 	// RegionID 指定优先使用的中继区域。
 	RegionID int
+
+	// SSH 为真时在隧道里开放 SSH（端口 22），对方可拿到 shell。
+	SSH bool
+
+	// SSHFileDir 非空时开放 SFTP，目录为根，只读。
+	SSHFileDir string
+
+	// SSHAuthorizedKeys 是允许登录的 OpenSSH 公钥，空表示只靠隧道身份。
+	SSHAuthorizedKeys []string
 }
 
 // StartServer 启动服务端并连上 DERP 中继。
@@ -66,8 +75,25 @@ func StartServer(opts ServerOptions) (*Server, error) {
 	}
 
 	var saved *SavedKey
-	ts := &tailcat.Server{
+	var sshOnce sync.Once
+	var sshHandler func(net.Conn)
+
+	var ts *tailcat.Server
+	ts = &tailcat.Server{
 		OnTCP: func(port uint16) func(net.Conn) {
+			if opts.SSH && port == SSHPort {
+				sshOnce.Do(func() {
+					so := tailcat.SSHOptions{
+						Shell:          true,
+						AuthorizedKeys: opts.SSHAuthorizedKeys,
+					}
+					if opts.SSHFileDir != "" {
+						so.Files = &tailcat.FileService{Dir: opts.SSHFileDir, Mode: tailcat.FileServeRO}
+					}
+					sshHandler = ts.SSHConnHandler(so)
+				})
+				return sshHandler
+			}
 			target, ok := opts.Targets[port]
 			if !ok {
 				return nil // 未暴露的端口：RST

@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -55,6 +56,10 @@ type runtime struct {
 	lat    time.Duration
 	qrAddr string
 	qrSrc  myui.ImageSource
+
+	termCmd string
+	termOut string
+	termErr string
 }
 
 // App 是界面状态。
@@ -454,6 +459,10 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 				myui.Switch(c, a.proxyOf(d.ID))
 				myui.Text(c, T("opt.allowProxy")).FontSize(12).TextColor(cream)
 			})
+			myui.Row(c).Gap(10).Children(func() {
+				myui.Switch(c, a.sshOf(d.ID))
+				myui.Text(c, T("opt.ssh")).FontSize(12).TextColor(cream)
+			})
 			myui.Column(c).Gap(6).Width(420).Children(func() {
 				myui.Text(c, T("opt.allowedClients")).FontSize(11).TextColor(dim)
 				myui.TextInput(c, a.allowedOf(d.ID))
@@ -558,6 +567,35 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		}
 	})
 
+	if connected {
+		myui.Column(c).Gap(8).FillWidth().Padding(20, 0).Children(func() {
+			myui.Text(c, T("term.title")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+
+			myui.Row(c).Gap(10).Children(func() {
+				myui.TextInput(c, a.termCmdOf(d.ID)).Width(360)
+				if myui.PrimaryButton(c, T("term.run")).Width(88).Clicked() {
+					a.runRemoteCommand(d.ID)
+				}
+			})
+
+			rt := a.runtimeOf(d.ID)
+			body := T("term.empty")
+			if rt != nil && rt.termOut != "" {
+				body = rt.termOut
+			}
+			myui.Column(c).Padding(12).Radius(radCard).
+				Background(myui.Hex(colPanel)).Width(560).Children(func() {
+				myui.Text(c, body).Font(fontMono).FontSize(11).
+					TextColor(myui.Hex("#C6D2CE"))
+			})
+			if rt != nil && rt.termErr != "" {
+				myui.Text(c, rt.termErr).FontSize(11.5).
+					TextColor(myui.Hex(colDanger))
+			}
+		})
+	}
+
 	if !connected {
 		myui.Row(c).Gap(10).Padding(16, 0).Children(func() {
 			myui.Switch(c, a.socksOf(d.ID))
@@ -661,6 +699,70 @@ func (a *App) socksOf(id string) *bool {
 		}
 	}
 	return new(bool)
+}
+
+// sshOf 返回 host 的 SSH 开关指针。
+func (a *App) sshOf(id string) *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			return &a.devices[i].SSH
+		}
+	}
+	return new(bool)
+}
+
+// termCmdOf 返回该设备终端输入框绑定的字符串。
+func (a *App) termCmdOf(id string) *string {
+	rt := a.ensureRuntime(id)
+	return &rt.termCmd
+}
+
+// runRemoteCommand 在对方机器上执行命令，结果写进终端区。
+func (a *App) runRemoteCommand(id string) {
+	rt := a.ensureRuntime(id)
+
+	a.mu.Lock()
+	cmd := strings.TrimSpace(rt.termCmd)
+	var addr string
+	for _, d := range a.devices {
+		if d.ID == id {
+			addr = d.Addr
+		}
+	}
+	rt.termErr = ""
+	a.mu.Unlock()
+
+	if cmd == "" {
+		return
+	}
+	if addr == "" {
+		a.mu.Lock()
+		rt.termErr = "还没有对方的地址"
+		a.mu.Unlock()
+		a.refresh()
+		return
+	}
+
+	a.mu.Lock()
+	rt.termOut = "…"
+	a.mu.Unlock()
+	a.refresh()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		out, err := core.SSHExec(ctx, addr, cmd)
+
+		a.mu.Lock()
+		rt.termOut = out
+		if err != nil {
+			rt.termErr = err.Error()
+		}
+		a.mu.Unlock()
+		a.refresh()
+	}()
 }
 
 // allowedOf 把白名单数组折叠成一行文本供编辑。
@@ -877,6 +979,7 @@ func (a *App) startHost(id string) {
 		Targets:        targets,
 		UDP:            dev.UDP,
 		AllowProxy:     dev.AllowProxy,
+		SSH:            dev.SSH,
 		AllowedClients: dev.AllowedClients,
 	}
 	if dev.Persistent {
