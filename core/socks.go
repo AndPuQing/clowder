@@ -8,15 +8,17 @@ import (
 	"net"
 )
 
-// ServeSOCKS5 在本地监听一个 SOCKS5 代理，所有 CONNECT 都经过隧道。
+// ServeSOCKS5 listens for SOCKS5 clients and dials every CONNECT through
+// the supplied dialer.
 //
-// 这就是「访问对方内网」的入口：浏览器、curl 把代理指向 127.0.0.1:1080，
-// 目标地址由服务端按它的网络去拨号。服务端需要打开「允许访问内网」，
-// 否则 tailcat 会拒绝转发。
+// This is the entry point for "reach the peer's network": browsers and
+// curl point their proxy at 127.0.0.1:1080 and the host dials the target
+// on their behalf. The host must allow proxying, otherwise tailcat
+// refuses the forward.
 func ServeSOCKS5(ctx context.Context, listenAddr string, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (net.Listener, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("监听 %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("listen on %s: %w", listenAddr, err)
 	}
 
 	go func() {
@@ -40,7 +42,7 @@ func ServeSOCKS5(ctx context.Context, listenAddr string, dial func(ctx context.C
 func socksConn(ctx context.Context, c net.Conn, dial func(context.Context, string, string) (net.Conn, error)) {
 	defer c.Close()
 
-	// 握手：VER NMETHODS METHODS...
+	// Greeting: VER NMETHODS METHODS...
 	head := make([]byte, 2)
 	if _, err := io.ReadFull(c, head); err != nil || head[0] != 5 {
 		return
@@ -49,17 +51,18 @@ func socksConn(ctx context.Context, c net.Conn, dial func(context.Context, strin
 	if _, err := io.ReadFull(c, methods); err != nil {
 		return
 	}
-	// 只支持「无需认证」（隧道本身已经加密）
+	// Only "no authentication" is offered; the tunnel is already
+	// encrypted and authenticated.
 	if _, err := c.Write([]byte{5, 0}); err != nil {
 		return
 	}
 
-	// 请求：VER CMD RSV ATYP DST.ADDR DST.PORT
+	// Request: VER CMD RSV ATYP DST.ADDR DST.PORT
 	req := make([]byte, 4)
 	if _, err := io.ReadFull(c, req); err != nil {
 		return
 	}
-	if req[0] != 5 || req[1] != 1 { // 只处理 CONNECT
+	if req[0] != 5 || req[1] != 1 { // CONNECT only
 		c.Write([]byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0}) // command not supported
 		return
 	}
@@ -81,7 +84,7 @@ func socksConn(ctx context.Context, c net.Conn, dial func(context.Context, strin
 	}
 	defer remote.Close()
 
-	// 成功应答
+	// Success reply.
 	if _, err := c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
@@ -89,7 +92,7 @@ func socksConn(ctx context.Context, c net.Conn, dial func(context.Context, strin
 	pipe(c, remote)
 }
 
-// readSocksAddr 读取 SOCKS5 的地址字段，返回主机部分。
+// readSocksAddr reads the SOCKS5 address field and returns its host part.
 func readSocksAddr(c net.Conn, atyp byte) (string, error) {
 	switch atyp {
 	case 1: // IPv4
@@ -98,7 +101,7 @@ func readSocksAddr(c net.Conn, atyp byte) (string, error) {
 			return "", err
 		}
 		return net.IP(b).String(), nil
-	case 3: // 域名
+	case 3: // domain name
 		l := make([]byte, 1)
 		if _, err := io.ReadFull(c, l); err != nil {
 			return "", err
@@ -115,6 +118,6 @@ func readSocksAddr(c net.Conn, atyp byte) (string, error) {
 		}
 		return net.IP(b).String(), nil
 	default:
-		return "", fmt.Errorf("不支持的地址类型 %d", atyp)
+		return "", fmt.Errorf("unsupported address type %d", atyp)
 	}
 }

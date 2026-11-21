@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的标签（例如 v0.1.0）"
+        description: "Tag to release (for example v0.1.0)"
         required: true
 
 permissions:
@@ -58,7 +58,7 @@ jobs:
         with:
           go-version: "1.27.x"
 
-      # Runner 是 Intel，用 clang -arch 交叉出 arm64，两个架构各打一个 .app
+      # The runner is Intel; use clang -arch to cross-build arm64, one .app per arch
       - name: Build both arches
         env:
           CGO_ENABLED: "1"
@@ -67,7 +67,7 @@ jobs:
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
 
-          # Go 的 GOARCH 与 clang 的 -arch 名称不同
+          # Go's GOARCH names differ from clang's -arch names
           clang_arch() {
             case "$1" in
               amd64) echo x86_64 ;;
@@ -175,12 +175,14 @@ jobs:
           body: |
             Clowder ${{ github.ref_name }}
 
-            | 平台 | 文件 | 运行前需要 |
+            | Platform | File | Before you run it |
             |---|---|---|
             | macOS (Apple Silicon) | `clowder-darwin-arm64.zip` | — |
             | macOS (Intel) | `clowder-darwin-amd64.zip` | — |
-            | Windows | `clowder-windows-amd64.zip` | WebView2（Win11 自带） |
-            | Linux | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`、`libwebkit2gtk-4.1-0`、`libayatana-appindicator3-1`（托盘） |
+            | Windows | `clowder-windows-amd64.zip` | WebView2 (included in Windows 11) |
+            | Linux | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` (tray) |
 
-            macOS 解压后把 `Clowder.app` 拖进「应用程序」；首次打开若被系统拦，
-            右键 → 打开。命令行版本 `clowderd` 随包提供。每个包附 `.sha256` 校验文件。
+            On macOS, unzip and drag `Clowder.app` into Applications. If the
+            system blocks the first launch, right-click it and choose Open.
+            The command-line build `clowderd` is included. Each archive has a
+            `.sha256` checksum file.

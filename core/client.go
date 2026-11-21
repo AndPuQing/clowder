@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
@@ -10,9 +11,18 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/types/logger"
 )
 
-// Client 通过 tailcat 地址连到服务端，并把隧道里的端口映射到本机。
+// UDP flow limits: a datagram flood must not be able to create unbounded
+// tunnels, and an idle flow should not live forever.
+const (
+	maxUDPFlows    = 256
+	udpIdleTimeout = 2 * time.Minute
+)
+
+// Client connects to a tailcat address and maps tunnel ports onto this
+// machine.
 type Client struct {
 	tc *tailcat.Client
 
@@ -23,20 +33,32 @@ type Client struct {
 	cancels    []context.CancelFunc
 }
 
-// ClientOptions 是创建客户端的参数。
+// ClientOptions configures a Client.
 type ClientOptions struct {
-	// Addr 是服务端的 tailcat 地址。
+	// Addr is the host's tailcat address.
 	Addr string
 
-	// KeyName 指定持久化密钥的名字。设置后客户端公钥固定，
-	// 服务端才能用 AllowedClients 做白名单。
+	// KeyName selects a persistent client key. A host can only
+	// allow-list clients whose key does not change between runs.
 	KeyName string
 
-	// DERPMapURL 覆盖默认中继列表地址。
+	// DERPMapURL overrides the default relay map URL.
 	DERPMapURL string
+
+	// Verbose prints the network stack's diagnostic log to stderr.
+	Verbose bool
 }
 
-// PublicKeyOf 返回指定名字的持久化密钥对应的公钥。
+// tailcatLogf returns the logger handed to tailcat. The network stack is
+// chatty, so it is silent unless the caller asked for diagnostics.
+func tailcatLogf(verbose bool) logger.Logf {
+	if verbose {
+		return log.Printf
+	}
+	return func(string, ...any) {}
+}
+
+// PublicKeyOf returns the public key of the named persistent key.
 func PublicKeyOf(name string) (string, error) {
 	k, err := LoadKey(name)
 	if err != nil {
@@ -45,7 +67,8 @@ func PublicKeyOf(name string) (string, error) {
 	return k.PublicKey(), nil
 }
 
-// NewClientWithOptions 按选项创建客户端，支持持久化密钥。
+// NewClientWithOptions creates a client with optional persistent key and
+// relay settings.
 func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 	c, err := NewClient(opts.Addr)
 	if err != nil {
@@ -54,9 +77,14 @@ func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 	if opts.DERPMapURL != "" {
 		c.tc.DERPMapURL = opts.DERPMapURL
 	}
+	if opts.Verbose {
+		c.tc.Logf = tailcatLogf(true)
+	}
 	if opts.KeyName != "" {
 		k, _, err := LoadOrCreateKey(opts.KeyName)
 		if err != nil {
+			// Do not leak the client we already built.
+			_ = c.tc.Close()
 			return nil, err
 		}
 		c.tc.Key = k.NodeKey
@@ -64,20 +92,31 @@ func NewClientWithOptions(opts ClientOptions) (*Client, error) {
 	return c, nil
 }
 
-// NewClient 校验地址格式后创建客户端。此时不会建立连接，
-// 隧道在第一次 Dial 时惰性建立。
+// NewClient validates the address and returns a client. Nothing is
+// dialed yet: the tunnel starts lazily on the first Dial.
 func NewClient(addr string) (*Client, error) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
-		return nil, fmt.Errorf("地址为空")
+		return nil, fmt.Errorf("address is empty")
 	}
 	if !strings.HasPrefix(addr, "tc") {
-		return nil, fmt.Errorf("不是 tailcat 地址（应以 tc 开头）: %.16s", addr)
+		return nil, fmt.Errorf("not a tailcat address (must start with tc): %.16s", addr)
 	}
-	return &Client{tc: tailcat.NewClient(tailcat.Addr(addr))}, nil
+	// Parse now so a pasted, malformed address fails at paste time rather
+	// than on the first dial.
+	ci, err := tailcat.ParseAddr(tailcat.Addr(addr))
+	if err != nil {
+		return nil, fmt.Errorf("invalid tailcat address: %w", err)
+	}
+	if ci.ServerDiscoPublic.IsZero() {
+		return nil, fmt.Errorf("address comes from an old tailcat version; generate a new one")
+	}
+	tc := tailcat.NewClient(tailcat.Addr(addr))
+	tc.Logf = tailcatLogf(false)
+	return &Client{tc: tc}, nil
 }
 
-// Ping 测一次往返，用来确认地址是否还有效。
+// Ping measures one round trip, to check that the address is still live.
 func (c *Client) Ping(timeout time.Duration) (time.Duration, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -89,24 +128,25 @@ func (c *Client) Ping(timeout time.Duration) (time.Duration, error) {
 	return res.Latency, nil
 }
 
-// PublicKey 返回本客户端的节点公钥（服务端可据此做白名单）。
+// PublicKey returns this client's node public key.
 func (c *Client) PublicKey() string {
 	return c.tc.PublicKey().String()
 }
 
-// Dial 通过隧道连到服务端的某个 TCP 端口。
+// Dial opens a tunnel connection to one of the host's TCP ports.
 func (c *Client) Dial(remotePort uint16, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.tc.DialTCPPort(ctx, remotePort)
 }
 
-// Forward 在本机 listenAddr 上监听，把收到的连接转进隧道送到 remotePort。
-// 返回的 listener 已经启动接受循环，调用 Close 收工。
+// Forward listens on listenAddr and sends every accepted connection into
+// the tunnel to remotePort. The returned listener is already accepting;
+// Close stops it.
 func (c *Client) Forward(listenAddr string, remotePort uint16) (net.Listener, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("监听 %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("listen on %s: %w", listenAddr, err)
 	}
 
 	c.mu.Lock()
@@ -126,7 +166,8 @@ func (c *Client) Forward(listenAddr string, remotePort uint16) (net.Listener, er
 	return ln, nil
 }
 
-// handle 为一条本地连接开一条隧道连接，然后双向搬运。
+// handle opens a tunnel connection for one local connection and copies
+// bytes both ways.
 func (c *Client) handle(local net.Conn, remotePort uint16) {
 	defer local.Close()
 
@@ -139,11 +180,12 @@ func (c *Client) handle(local net.Conn, remotePort uint16) {
 	pipe(local, remote)
 }
 
-// ForwardUDP 在本机 listenAddr 上监听 UDP，把每个来源的报文转进隧道到 remotePort。
+// ForwardUDP listens on listenAddr and sends each source's datagrams into
+// the tunnel to remotePort.
 func (c *Client) ForwardUDP(listenAddr string, remotePort uint16) (net.PacketConn, error) {
 	pc, err := net.ListenPacket("udp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("监听 UDP %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("listen on UDP %s: %w", listenAddr, err)
 	}
 
 	c.mu.Lock()
@@ -152,22 +194,34 @@ func (c *Client) ForwardUDP(listenAddr string, remotePort uint16) (net.PacketCon
 
 	go func() {
 		buf := make([]byte, 64*1024)
+		slots := make(chan struct{}, maxUDPFlows)
 		for {
 			n, src, err := pc.ReadFrom(buf)
 			if err != nil {
 				return
 			}
-			go c.udpFlow(pc, src, append([]byte(nil), buf[:n]...), remotePort)
+			payload := append([]byte(nil), buf[:n]...)
+			select {
+			case slots <- struct{}{}:
+				go func() {
+					defer func() { <-slots }()
+					c.udpFlow(pc, src, payload, remotePort)
+				}()
+			default:
+				// Too many concurrent flows: drop the datagram rather
+				// than grow without bound.
+			}
 		}
 	}()
 
 	return pc, nil
 }
 
-// udpFlow 为一个来源开一条隧道 UDP 连接，收到回包再写回该来源。
+// udpFlow opens one tunnel UDP flow per source and relays replies back to
+// that source.
 //
-// 注意：这里不能拿到连接就返回——context 一旦取消，连接会被关掉，
-// 所以读循环留在本函数里跑，直到流结束。
+// The read loop has to stay in this function: cancelling the context
+// closes the tunnel connection, so returning early would kill it.
 func (c *Client) udpFlow(pc net.PacketConn, src net.Addr, first []byte, remotePort uint16) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -184,6 +238,7 @@ func (c *Client) udpFlow(pc net.PacketConn, src net.Addr, first []byte, remotePo
 
 	buf := make([]byte, 64*1024)
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
 		n, err := conn.Read(buf)
 		if err != nil {
 			return
@@ -194,7 +249,8 @@ func (c *Client) udpFlow(pc net.PacketConn, src net.Addr, first []byte, remotePo
 	}
 }
 
-// SOCKS5 在本地起一个 SOCKS5 代理，所有连接经隧道送到对方网络。
+// SOCKS5 starts a local SOCKS5 proxy whose connections are carried by the
+// tunnel and dialed by the host.
 func (c *Client) SOCKS5(listenAddr string) (net.Listener, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -221,7 +277,7 @@ func (c *Client) SOCKS5(listenAddr string) (net.Listener, error) {
 	return ln, nil
 }
 
-// Close 关掉所有本地监听和隧道。
+// Close stops every local listener and shuts the tunnel down.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	lns := c.listeners

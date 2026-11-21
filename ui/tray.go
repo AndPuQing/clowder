@@ -3,7 +3,6 @@ package ui
 import (
 	"bytes"
 	"fmt"
-	"image"
 	"image/color"
 	"image/png"
 	"os"
@@ -13,49 +12,15 @@ import (
 	"github.com/AndPuQing/clowder/core"
 )
 
-// trayIcon 生成托盘图标：猫头剪影（圆脸 + 两只耳朵）。
-//
-// macOS 的 template 图标只看 alpha 通道，所以同一张图在三个平台都能用。
+// trayIcon renders the app mark to a PNG for the tray and the window icon.
+// It comes from the same SVG as the mark in the sidebar, so the two never
+// drift apart.
 func trayIcon() []byte {
-	const size = 32
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-
-	fill := color.RGBA{R: 0xC9, G: 0xA2, B: 0x27, A: 0xFF}
-
-	// 圆点（抗锯齿靠超采样）
-	circle := func(cx, cy, r float64) {
-		for y := 0; y < size; y++ {
-			for x := 0; x < size; x++ {
-				const sub = 4
-				hit := 0
-				for sy := 0; sy < sub; sy++ {
-					for sx := 0; sx < sub; sx++ {
-						px := float64(x) + (float64(sx)+0.5)/sub
-						py := float64(y) + (float64(sy)+0.5)/sub
-						dx, dy := px-cx, py-cy
-						if dx*dx+dy*dy <= r*r {
-							hit++
-						}
-					}
-				}
-				if hit == 0 {
-					continue
-				}
-				alpha := uint8(255 * hit / (sub * sub))
-				old := img.RGBAAt(x, y)
-				if alpha > old.A {
-					img.SetRGBA(x, y, color.RGBA{fill.R, fill.G, fill.B, alpha})
-				}
-			}
-		}
+	mark := icon("mark")
+	if mark == nil {
+		return nil
 	}
-
-	// 耳朵
-	circle(10, 9, 4.6)
-	circle(22, 9, 4.6)
-	// 脸
-	circle(16, 19, 10)
-
+	img := mark.Image(32, 32, color.White)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil
@@ -63,7 +28,7 @@ func trayIcon() []byte {
 	return buf.Bytes()
 }
 
-// setupTray 创建托盘图标；没有托盘的环境（如无头容器）直接跳过。
+// setupTray creates the tray icon, if the desktop provides a tray.
 func (a *App) setupTray() {
 	icon := trayIcon()
 	if icon == nil {
@@ -75,7 +40,7 @@ func (a *App) setupTray() {
 		Icon: icon,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "clowder: 托盘不可用：%v\n", err)
+		fmt.Fprintf(os.Stderr, "clowder: tray unavailable: %v\n", err)
 		return
 	}
 
@@ -87,28 +52,47 @@ func (a *App) setupTray() {
 	a.rebuildTrayMenu()
 }
 
-// showWindow 把窗口叫回前台。
+// showWindow brings the window back to the front.
 func (a *App) showWindow() {
 	mygo.RunOnMain(func() {
-		if a.window == nil {
+		a.mu.Lock()
+		w := a.window
+		a.mu.Unlock()
+		if w == nil {
 			return
 		}
-		a.window.Show()
-		a.window.Focus()
+		w.Show()
+		w.Focus()
 	})
 }
 
-// rebuildTrayMenu 按当前设备与运行状态重建托盘菜单。
+// rebuildTrayMenu rebuilds the tray menu from the current devices and
+// their runtime state.
 func (a *App) rebuildTrayMenu() {
 	a.mu.Lock()
 	tray := a.tray
-	devices := append([]core.Device(nil), a.devices...)
+	devices := append([]*core.Device(nil), a.devices...)
+	type flags struct {
+		busy, srv, cli bool
+		errMsg         string
+	}
+	state := make(map[string]flags, len(devices))
 	running := 0
 	for _, d := range devices {
 		rt := a.rt[d.ID]
-		if rt != nil && (rt.srv != nil || rt.cli != nil) {
-			running++
+		f := flags{}
+		if rt != nil {
+			f = flags{
+				busy:   rt.busy,
+				srv:    rt.srv != nil,
+				cli:    rt.cli != nil,
+				errMsg: rt.errMsg,
+			}
+			if f.srv || f.cli {
+				running++
+			}
 		}
+		state[d.ID] = f
 	}
 	a.mu.Unlock()
 
@@ -123,28 +107,25 @@ func (a *App) rebuildTrayMenu() {
 
 	for _, d := range devices {
 		d := d
+		f := state[d.ID]
 		status, _ := a.deviceStatus(d)
-		rt := a.runtimeOf(d.ID)
-		busy := rt != nil && rt.busy
-		srvOn := rt != nil && rt.srv != nil
-		cliOn := rt != nil && rt.cli != nil
 
 		sub := []*mygo.MenuItem{}
 		if d.Role == core.RoleHost {
-			if srvOn {
+			if f.srv {
 				sub = append(sub, &mygo.MenuItem{Label: T("action.stop"), Click: func(*mygo.MenuItem, *mygo.Window) { a.stopHost(d.ID) }})
-			} else if !busy {
+			} else if !f.busy {
 				sub = append(sub, &mygo.MenuItem{Label: T("action.ticket"), Click: func(*mygo.MenuItem, *mygo.Window) { a.startHost(d.ID) }})
 			}
 		} else {
-			if cliOn {
+			if f.cli {
 				sub = append(sub, &mygo.MenuItem{Label: T("action.disconnect"), Click: func(*mygo.MenuItem, *mygo.Window) { a.stopPeer(d.ID) }})
-			} else if !busy {
+			} else if !f.busy {
 				sub = append(sub, &mygo.MenuItem{Label: T("action.connect"), Click: func(*mygo.MenuItem, *mygo.Window) { a.startPeer(d.ID) }})
 			}
 		}
-		if rt != nil && rt.errMsg != "" {
-			sub = append(sub, &mygo.MenuItem{Label: "ⓘ " + truncate(rt.errMsg, 40), Disabled: true})
+		if f.errMsg != "" {
+			sub = append(sub, &mygo.MenuItem{Label: "Error: " + truncate(f.errMsg, 40), Disabled: true})
 		}
 
 		items = append(items, &mygo.MenuItem{
@@ -165,21 +146,21 @@ func (a *App) rebuildTrayMenu() {
 	}
 
 	mygo.RunOnMain(func() {
-		_ = menu
 		tray.SetMenu(menu)
 		tray.SetToolTip(tip)
 	})
 }
 
-// quit 真正退出（托盘菜单里调用）。
+// quit writes pending changes and exits for real.
 func (a *App) quit() {
+	a.persistNow()
 	a.mu.Lock()
 	a.quitting = true
 	a.mu.Unlock()
 	mygo.RunOnMain(func() { mygo.App.Quit() })
 }
 
-// truncate 截断过长文案，菜单里不展开长错误。
+// truncate shortens text for menu labels.
 func truncate(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

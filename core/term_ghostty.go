@@ -4,15 +4,16 @@ package core
 
 import (
 	"fmt"
+	"io"
 	"sync"
 
 	"go.mitchellh.com/libghostty"
 )
 
-// Cell 是终端里的一格。
+// Cell is one terminal cell.
 type Cell struct {
 	Text string
-	// Fg / Bg 是 "#rrggbb"；空字符串表示沿用默认色。
+	// Fg and Bg are "#rrggbb"; an empty string means the default colour.
 	Fg, Bg  string
 	Bold    bool
 	Italic  bool
@@ -20,7 +21,7 @@ type Cell struct {
 	Inverse bool
 }
 
-// Snapshot 是一帧屏幕。
+// Snapshot is one rendered screen.
 type Snapshot struct {
 	Cols, Rows    int
 	Cells         [][]Cell
@@ -29,7 +30,8 @@ type Snapshot struct {
 	CursorVisible bool
 }
 
-// Term 是 libghostty 终端内核的封装：喂 VT 字节，取屏幕快照。
+// Term wraps libghostty's terminal core: feed it VT bytes and take screen
+// snapshots.
 type Term struct {
 	mu sync.Mutex
 
@@ -41,8 +43,16 @@ type Term struct {
 	cols, rows int
 }
 
-// NewTerm 创建一个终端。
+// NewTerm creates a terminal with the given size.
 func NewTerm(cols, rows int) (*Term, error) {
+	return NewTermWithWriter(cols, rows, nil)
+}
+
+// NewTermWithWriter creates a terminal that writes its responses (device
+// attributes, cursor position reports and similar) to w, as a real
+// terminal emulator would write them back to the pty. Without this, shells
+// that probe the terminal wait for replies that never come.
+func NewTermWithWriter(cols, rows int, w io.Writer) (*Term, error) {
 	if cols <= 0 {
 		cols = 80
 	}
@@ -50,12 +60,19 @@ func NewTerm(cols, rows int) (*Term, error) {
 		rows = 24
 	}
 
-	term, err := libghostty.NewTerminal(
+	opts := []libghostty.TerminalOption{
 		libghostty.WithSize(uint16(cols), uint16(rows)),
 		libghostty.WithMaxScrollbackLines(5000),
-	)
+	}
+	if w != nil {
+		opts = append(opts, libghostty.WithWritePty(func(_ *libghostty.Terminal, data []byte) {
+			// The slice is only valid for this call.
+			_, _ = w.Write(append([]byte(nil), data...))
+		}))
+	}
+	term, err := libghostty.NewTerminal(opts...)
 	if err != nil {
-		return nil, fmt.Errorf("创建终端: %w", err)
+		return nil, fmt.Errorf("create terminal: %w", err)
 	}
 
 	rs, err := libghostty.NewRenderState()
@@ -80,7 +97,7 @@ func NewTerm(cols, rows int) (*Term, error) {
 	return &Term{term: term, rs: rs, ri: ri, rc: rc, cols: cols, rows: rows}, nil
 }
 
-// Feed 写入一段 VT 数据（来自 SSH 的输出）。
+// Feed writes VT data (output read from the SSH session).
 func (t *Term) Feed(b []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -91,7 +108,7 @@ func (t *Term) Feed(b []byte) error {
 	return nil
 }
 
-// Resize 改变终端尺寸。
+// Resize changes the terminal size.
 func (t *Term) Resize(cols, rows int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -102,12 +119,12 @@ func (t *Term) Resize(cols, rows int) error {
 	return t.term.Resize(uint16(cols), uint16(rows), 0, 0)
 }
 
-// Snapshot 取一帧屏幕。
+// Snapshot renders the current screen.
 func (t *Term) Snapshot() (*Snapshot, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.term == nil {
-		return nil, fmt.Errorf("终端已关闭")
+		return nil, fmt.Errorf("terminal is closed")
 	}
 
 	if err := t.rs.Update(t.term); err != nil {
@@ -144,7 +161,8 @@ func (t *Term) Snapshot() (*Snapshot, error) {
 
 			gs, err := t.rc.Graphemes()
 			if err == nil && len(gs) > 0 {
-				// 一个单元格可能有多个码位（组合字符），拼起来
+				// A cell may hold several code points (combining
+				// characters); join them.
 				var sb []rune
 				for _, g := range gs {
 					sb = append(sb, rune(g))
@@ -156,6 +174,7 @@ func (t *Term) Snapshot() (*Snapshot, error) {
 				c.Bold = st.Bold()
 				c.Italic = st.Italic()
 				c.Inverse = st.Inverse()
+				c.Under = st.Underline() != libghostty.UnderlineNone
 				c.Fg = styleColorHex(st.FgColor(), colors, "")
 				c.Bg = styleColorHex(st.BgColor(), colors, "")
 			}
@@ -168,7 +187,7 @@ func (t *Term) Snapshot() (*Snapshot, error) {
 	return snap, nil
 }
 
-// Close 释放底层资源。
+// Close releases the underlying resources.
 func (t *Term) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -191,7 +210,8 @@ func (t *Term) Close() {
 	}
 }
 
-// styleColorHex 把样式颜色转成 "#rrggbb"，未设置时返回 fallback。
+// styleColorHex converts a style colour to "#rrggbb", falling back when the
+// colour is unset.
 func styleColorHex(sc libghostty.StyleColor, colors *libghostty.RenderStateColors, fallback string) string {
 	switch sc.Tag {
 	case libghostty.StyleColorRGB:
@@ -208,5 +228,5 @@ func rgbHex(c libghostty.ColorRGB) string {
 	return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)
 }
 
-// TerminalAvailable 报告是否编进了 libghostty。
+// TerminalAvailable reports whether libghostty was compiled in.
 func TerminalAvailable() bool { return true }

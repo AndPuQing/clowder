@@ -1,9 +1,9 @@
-// Command clowderd 是 Clowder 的守护进程。
+// Command clowderd is Clowder's headless daemon.
 //
-// 两个子命令：
+// Two subcommands:
 //
-//	clowderd serve -expose 8080                     本机 8080 通过隧道暴露出去
-//	clowderd dial -addr tc... -forward 9000:8080    隧道里的 8080 映射到本机 9000
+//	clowderd serve -expose 8080                     expose this machine's 8080
+//	clowderd dial -addr tc... -forward 9000:8080    map the tunnel's 8080 to local 9000
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +21,7 @@ import (
 	"github.com/AndPuQing/clowder/core"
 )
 
-// pairList 收集可重复的 -expose / -forward 参数。
+// pairList collects repeatable -expose / -forward flags.
 type pairList struct {
 	name string
 	vals []string
@@ -36,12 +37,14 @@ func (p *pairList) Set(v string) error {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Clowder daemon
 
-用法:
-  clowderd serve -expose <端口>[=<本机地址>] ... [-v]
-  clowderd dial  -addr <tc地址> -forward <本地端口>:<远端端口> ... [-ping]
-  clowderd keys  list | gen <名字> | show <名字> | rm <名字> | dir
+Usage:
+  clowderd serve -expose <port>[=<local address>] ... [-udp] [-ssh] [-ssh-files <dir>] [-v]
+  clowderd dial  -addr <tailcat address> -forward <local>:<remote> ... [-ping] [-socks <addr>] [-v]
+  clowderd keys  list | gen <name> | show <name> | rm <name> | dir
+  clowderd files -addr <address> [-key <name>] [-list <dir>] [-get <remote> [-out <local>]] [-v]
+  clowderd --version
 
-示例:
+Examples:
   clowderd serve -expose 8080
   clowderd serve -expose 8080=127.0.0.1:8080 -expose 2222=127.0.0.1:22
   clowderd dial -addr tcXXXX -forward 9000:8080
@@ -61,10 +64,14 @@ func main() {
 		runDial(os.Args[2:])
 	case "keys":
 		runKeys(os.Args[2:])
+	case "files":
+		runFiles(os.Args[2:])
+	case "-version", "--version", "version":
+		fmt.Printf("clowderd %s\n", core.Version)
 	case "-h", "--help", "help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "未知子命令: %s\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
 		usage()
 		os.Exit(2)
 	}
@@ -73,27 +80,39 @@ func main() {
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var exposes pairList
-	fs.Var(&exposes, "expose", "暴露的端口，可写成 端口=本机地址（可重复）")
-	verbose := fs.Bool("v", false, "打开调试日志")
-	keyName := fs.String("key", "", "持久化密钥名（给定后地址跨重启稳定；留空则用临时密钥）")
-	udp := fs.Bool("udp", false, "同时转发 UDP")
-	allowProxy := fs.Bool("allow-proxy", false, "允许对方经本机访问其它地址（内网）")
-	sshOn := fs.Bool("ssh", false, "在隧道里开放 SSH（22 端口），对方可拿到 shell")
-	sshDir := fs.String("ssh-files", "", "同时开放 SFTP，指定可读目录")
+	fs.Var(&exposes, "expose", "port to expose, optionally as port=local-address (repeatable)")
+	verbose := fs.Bool("v", false, "enable debug logging")
+	keyName := fs.String("key", "", "persistent key name (stable address across restarts; empty uses an ephemeral key)")
+	udp := fs.Bool("udp", false, "also forward UDP")
+	allowProxy := fs.Bool("allow-proxy", false, "let the peer reach other addresses through this host")
+	sshOn := fs.Bool("ssh", false, "open SSH inside the tunnel (port 22)")
+	sshDir := fs.String("ssh-files", "", "also expose SFTP, rooted at this read-only directory")
 	var allow pairList
-	fs.Var(&allow, "allow", "允许的客户端公钥（可重复）")
+	fs.Var(&allow, "allow", "client public key to allow (repeatable)")
 	fs.Parse(args)
 
 	if len(exposes.vals) == 0 {
-		fmt.Fprintln(os.Stderr, "至少要给一个 -expose")
+		fmt.Fprintln(os.Stderr, "at least one -expose is required")
 		os.Exit(2)
+	}
+
+	// Sharing a directory only makes sense with the SSH service, so
+	// -ssh-files implies -ssh rather than silently doing nothing.
+	if *sshDir != "" {
+		*sshOn = true
+	}
+	if *sshDir != "" {
+		if info, err := os.Stat(*sshDir); err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "-ssh-files: not a directory: %s\n", *sshDir)
+			os.Exit(2)
+		}
 	}
 
 	targets := make(map[uint16]string, len(exposes.vals))
 	for _, spec := range exposes.vals {
 		port, target, err := parseExpose(spec)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "解析 -expose %q: %v\n", spec, err)
+			fmt.Fprintf(os.Stderr, "parse -expose %q: %v\n", spec, err)
 			os.Exit(2)
 		}
 		targets[port] = target
@@ -110,114 +129,130 @@ func runServe(args []string) {
 		SSHFileDir:     *sshDir,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "start failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer srv.Close()
 
-	fmt.Println("🐈 服务已启动")
-	fmt.Printf("   暴露端口: %s\n", describeTargets(targets))
+	fmt.Println("Sharing")
+	fmt.Printf("   exposed ports: %s\n", describeTargets(targets))
 	if srv.UsingSavedKey() {
-		fmt.Printf("   密钥: %s（地址固定）\n", *keyName)
-		fmt.Printf("   公钥: %s\n", srv.PublicKey())
+		fmt.Printf("   key: %s (stable address)\n", *keyName)
+		fmt.Printf("   public key: %s\n", srv.PublicKey())
 	} else {
-		fmt.Println("   密钥: 临时（地址仅本次有效）")
+		fmt.Println("   key: ephemeral (this address dies with the process)")
 	}
-	fmt.Printf("   内部地址: %s\n", srv.ListenAddr())
+	fmt.Printf("   internal address: %s\n", srv.ListenAddr())
 	fmt.Println()
-	fmt.Printf("地址（发给客户端）:\n%s\n\n", srv.Address())
-	fmt.Println("按 Ctrl-C 停止，地址随即失效。")
+	fmt.Printf("Address (send this to the peer):\n%s\n\n", srv.Address())
+	fmt.Println("Press Ctrl-C to stop; the address stops working immediately.")
 
 	waitForSignal()
 }
 
 func runDial(args []string) {
 	fs := flag.NewFlagSet("dial", flag.ExitOnError)
-	addr := fs.String("addr", "", "服务端的 tailcat 地址")
+	addr := fs.String("addr", "", "the host's tailcat address")
 	var forwards pairList
-	fs.Var(&forwards, "forward", "本地端口:远端端口（可重复）")
-	pingOnly := fs.Bool("ping", false, "只测连通性，不做映射")
-	keyName := fs.String("key", "", "持久化密钥名（固定客户端公钥，便于服务端白名单）")
-	udp := fs.Bool("udp", false, "同时转发 UDP")
-	socks := fs.String("socks", "", "在本地起 SOCKS5 代理（如 127.0.0.1:1080）")
-	sshExec := fs.String("ssh-exec", "", "经隧道在对方机器上执行一条命令后退出")
+	fs.Var(&forwards, "forward", "local:remote port mapping (repeatable)")
+	pingOnly := fs.Bool("ping", false, "only test connectivity, do not map ports")
+	keyName := fs.String("key", "", "persistent client key (stable public key for the host's allow-list)")
+	udp := fs.Bool("udp", false, "also forward UDP")
+	socks := fs.String("socks", "", "start a local SOCKS5 proxy (for example 127.0.0.1:1080)")
+	sshExec := fs.String("ssh-exec", "", "run one command on the host through the tunnel, then exit")
+	verbose := fs.Bool("v", false, "print the network stack's diagnostic log")
 	fs.Parse(args)
 
 	if *addr == "" {
-		fmt.Fprintln(os.Stderr, "必须给 -addr")
+		fmt.Fprintln(os.Stderr, "-addr is required")
 		os.Exit(2)
 	}
 
-	c, err := core.NewClientWithOptions(core.ClientOptions{Addr: *addr, KeyName: *keyName})
+	c, err := core.NewClientWithOptions(core.ClientOptions{
+		Addr:    *addr,
+		KeyName: *keyName,
+		Verbose: *verbose,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "地址无效: %v\n", err)
+		fmt.Fprintf(os.Stderr, "invalid address: %v\n", err)
 		os.Exit(2)
 	}
 	defer c.Close()
 
-	fmt.Printf("本端公钥: %s\n", c.PublicKey())
+	fmt.Printf("local public key: %s\n", c.PublicKey())
 
 	if *sshExec != "" {
-		out, err := core.SSHExec(context.Background(), *addr, *sshExec)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Reuse this client so -key applies: a host with an allow-list
+		// sees the same public key that was printed above.
+		conn, derr := c.Dial(core.SSHPort, 20*time.Second)
+		var out string
+		err := derr
+		if derr == nil {
+			out, err = core.SSHExecConn(ctx, conn, *sshExec)
+		}
+		// Print whatever the command produced, even when it failed.
+		fmt.Print(out)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "SSH 执行失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "ssh failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Print(out)
 		return
 	}
 
 	lat, err := c.Ping(30 * time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "连不上服务端: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cannot reach the host: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("隧道已通，往返 %v\n", lat.Round(time.Millisecond))
+	fmt.Printf("tunnel is up, round trip %v\n", lat.Round(time.Millisecond))
 
 	if *pingOnly {
 		return
 	}
 	if len(forwards.vals) == 0 {
-		fmt.Fprintln(os.Stderr, "没有 -forward，隧道建好后直接退出（可加 -ping 只测连通）")
+		fmt.Fprintln(os.Stderr, "no -forward given; exiting after the tunnel came up (use -ping to only test)")
 		return
 	}
 
 	for _, spec := range forwards.vals {
 		local, remote, err := parseForward(spec)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "解析 -forward %q: %v\n", spec, err)
+			fmt.Fprintf(os.Stderr, "parse -forward %q: %v\n", spec, err)
 			os.Exit(2)
 		}
 		ln, err := c.Forward(local, remote)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "本地监听失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "local listener failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("已映射 本机 %s → 隧道 %d\n", ln.Addr(), remote)
+		fmt.Printf("mapped local %s -> tunnel %d\n", ln.Addr(), remote)
 
 		if *udp {
 			if _, err := c.ForwardUDP(local, remote); err != nil {
-				fmt.Fprintf(os.Stderr, "UDP 监听失败: %v\n", err)
+				fmt.Fprintf(os.Stderr, "UDP listener failed: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("已映射 UDP 本机 %s → 隧道 %d\n", local, remote)
+			fmt.Printf("mapped local UDP %s -> tunnel %d\n", local, remote)
 		}
 	}
 
 	if *socks != "" {
 		ln, err := c.SOCKS5(*socks)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "SOCKS5 启动失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "SOCKS5 failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("SOCKS5 代理已开在 %s\n", ln.Addr())
+		fmt.Printf("SOCKS5 proxy listening on %s\n", ln.Addr())
 	}
 
-	fmt.Println("\n按 Ctrl-C 断开。")
+	fmt.Println("\nPress Ctrl-C to disconnect.")
 	waitForSignal()
 }
 
-// parseExpose 解析 "8080" 或 "8080=127.0.0.1:8080"。
+// parseExpose parses "8080" or "8080=127.0.0.1:8080".
 func parseExpose(spec string) (uint16, string, error) {
 	if i := strings.IndexByte(spec, '='); i >= 0 {
 		port, err := parsePort(spec[:i])
@@ -233,11 +268,11 @@ func parseExpose(spec string) (uint16, string, error) {
 	return port, fmt.Sprintf("127.0.0.1:%d", port), nil
 }
 
-// parseForward 解析 "9000:8080"。
+// parseForward parses "9000:8080".
 func parseForward(spec string) (string, uint16, error) {
 	i := strings.IndexByte(spec, ':')
 	if i < 0 {
-		return "", 0, fmt.Errorf("要写成 本地端口:远端端口")
+		return "", 0, fmt.Errorf("mapping must be written local:remote")
 	}
 	local := spec[:i]
 	if _, err := parsePort(local); err != nil {
@@ -253,7 +288,7 @@ func parseForward(spec string) (string, uint16, error) {
 func parsePort(s string) (uint16, error) {
 	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 16)
 	if err != nil || n == 0 {
-		return 0, fmt.Errorf("端口无效: %q", s)
+		return 0, fmt.Errorf("invalid port: %q", s)
 	}
 	return uint16(n), nil
 }
@@ -261,7 +296,7 @@ func parsePort(s string) (uint16, error) {
 func describeTargets(m map[uint16]string) string {
 	parts := make([]string, 0, len(m))
 	for port, target := range m {
-		parts = append(parts, fmt.Sprintf("%d→%s", port, target))
+		parts = append(parts, fmt.Sprintf("%d->%s", port, target))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -270,13 +305,79 @@ func waitForSignal() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
-	fmt.Println("\n已停止。")
+	fmt.Println("\nStopped.")
 }
 
-// runKeys 管理持久化密钥。
+// runFiles lists or downloads files from a host that shares a directory.
+func runFiles(args []string) {
+	fs := flag.NewFlagSet("files", flag.ExitOnError)
+	addr := fs.String("addr", "", "the host's tailcat address")
+	keyName := fs.String("key", "", "persistent client key (needed when the host has an allow-list)")
+	dir := fs.String("list", "/", "directory to list")
+	get := fs.String("get", "", "remote file to download")
+	out := fs.String("out", "", "local path for -get (default: the remote base name)")
+	verbose := fs.Bool("v", false, "print the network stack's diagnostic log")
+	fs.Parse(args)
+
+	if *addr == "" {
+		fmt.Fprintln(os.Stderr, "-addr is required")
+		os.Exit(2)
+	}
+
+	c, err := core.NewClientWithOptions(core.ClientOptions{
+		Addr:    *addr,
+		KeyName: *keyName,
+		Verbose: *verbose,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid address: %v\n", err)
+		os.Exit(2)
+	}
+	defer c.Close()
+
+	conn, err := c.Dial(core.SSHPort, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "connect: %v\n", err)
+		os.Exit(1)
+	}
+	files, err := core.OpenFiles(conn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer files.Close()
+
+	if *get != "" {
+		local := *out
+		if local == "" {
+			local = path.Base(*get)
+		}
+		if err := files.Download(*get, local); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("saved %s\n", local)
+		return
+	}
+
+	entries, err := files.List(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	for _, e := range entries {
+		kind := "file"
+		if e.Dir {
+			kind = "dir "
+		}
+		fmt.Printf("%s %10d  %s\n", kind, e.Size, e.Name)
+	}
+}
+
+// runKeys manages persistent keys.
 func runKeys(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "用法: clowderd keys list|gen <名>|show <名>|rm <名>|dir")
+		fmt.Fprintln(os.Stderr, "usage: clowderd keys list|gen <name>|show <name>|rm <name>|dir")
 		os.Exit(2)
 	}
 
@@ -296,21 +397,22 @@ func runKeys(args []string) {
 			os.Exit(1)
 		}
 		if len(names) == 0 {
-			fmt.Println("（还没有密钥）")
+			fmt.Println("(no keys yet)")
 			return
 		}
 		for _, n := range names {
 			k, err := core.LoadKey(n)
 			if err != nil {
-				fmt.Printf("%-16s (读取失败: %v)\n", n, err)
+				fmt.Printf("%-16s (read failed: %v)\n", n, err)
 				continue
 			}
-			fmt.Printf("%-16s %s  建于 %s\n", n, k.PublicKey(), k.CreatedAt.Local().Format("2006-01-02 15:04"))
+			fmt.Printf("%-16s %s  created %s\n", n, k.PublicKey(),
+				k.CreatedAt.Local().Format("2006-01-02 15:04"))
 		}
 
 	case "gen":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "要指定名字: clowderd keys gen <名字>")
+			fmt.Fprintln(os.Stderr, "name required: clowderd keys gen <name>")
 			os.Exit(2)
 		}
 		k, err := core.GenerateKey(args[1])
@@ -322,11 +424,11 @@ func runKeys(args []string) {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("已生成 %s\n公钥: %s\n", k.Name, k.PublicKey())
+		fmt.Printf("generated %s\npublic key: %s\n", k.Name, k.PublicKey())
 
 	case "show":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "要指定名字: clowderd keys show <名字>")
+			fmt.Fprintln(os.Stderr, "name required: clowderd keys show <name>")
 			os.Exit(2)
 		}
 		k, err := core.LoadKey(args[1])
@@ -334,21 +436,22 @@ func runKeys(args []string) {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("名字: %s\n公钥: %s\n创建: %s\n", k.Name, k.PublicKey(), k.CreatedAt.Local().Format(time.RFC3339))
+		fmt.Printf("name: %s\npublic key: %s\ncreated: %s\n", k.Name,
+			k.PublicKey(), k.CreatedAt.Local().Format(time.RFC3339))
 
 	case "rm":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "要指定名字: clowderd keys rm <名字>")
+			fmt.Fprintln(os.Stderr, "name required: clowderd keys rm <name>")
 			os.Exit(2)
 		}
 		if err := core.DeleteKey(args[1]); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("已删除 %s\n", args[1])
+		fmt.Printf("deleted %s\n", args[1])
 
 	default:
-		fmt.Fprintf(os.Stderr, "未知的 keys 子命令: %s\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown keys subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
 }

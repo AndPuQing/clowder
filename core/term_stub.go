@@ -2,9 +2,13 @@
 
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+)
 
-// Cell 是终端里的一格（未启用 libghostty 时的占位定义）。
+// Cell is one terminal cell. This is the placeholder definition used when
+// the build does not include libghostty.
 type Cell struct {
 	Text           string
 	Fg, Bg         string
@@ -12,7 +16,7 @@ type Cell struct {
 	Under, Inverse bool
 }
 
-// Snapshot 是一帧屏幕。
+// Snapshot is one rendered screen.
 type Snapshot struct {
 	Cols, Rows    int
 	Cells         [][]Cell
@@ -21,20 +25,32 @@ type Snapshot struct {
 	CursorVisible bool
 }
 
-// Term 在未启用 libghostty 的构建里不可用。
+// Term is unavailable when the build does not include libghostty.
 type Term struct{}
 
-// NewTerm 返回错误：这个构建没有终端内核。
+// NewTerm reports that this build has no terminal core.
 func NewTerm(cols, rows int) (*Term, error) {
-	return nil, fmt.Errorf("这个构建没有启用终端内核（需要 libghostty）")
+	return NewTermWithWriter(cols, rows, nil)
 }
 
-func (t *Term) Feed(b []byte) error         { return nil }
-func (t *Term) Resize(cols, rows int) error { return nil }
-func (t *Term) Snapshot() (*Snapshot, error) {
-	return nil, fmt.Errorf("这个构建没有启用终端内核")
+// NewTermWithWriter reports that this build has no terminal core.
+func NewTermWithWriter(cols, rows int, w io.Writer) (*Term, error) {
+	return nil, fmt.Errorf("this build has no terminal core (requires libghostty)")
 }
+
+// Feed is a no-op without a terminal core.
+func (t *Term) Feed(b []byte) error { return nil }
+
+// Resize is a no-op without a terminal core.
+func (t *Term) Resize(cols, rows int) error { return nil }
+
+// Snapshot reports that this build has no terminal core.
+func (t *Term) Snapshot() (*Snapshot, error) {
+	return nil, fmt.Errorf("this build has no terminal core")
+}
+
+// Close is a no-op without a terminal core.
 func (t *Term) Close() {}
 
-// TerminalAvailable 报告是否编进了 libghostty。
+// TerminalAvailable reports whether libghostty was compiled in.
 func TerminalAvailable() bool { return false }

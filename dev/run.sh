@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# 在开发容器里执行命令。
+# Run a command inside the development container.
 #
 #   dev/run.sh go build ./...
-#   dev/run.sh bash            # 进交互 shell
-#   dev/run.sh gui             # 无头启动 GUI 并截图（验证窗口能创建）
+#   dev/run.sh bash            # interactive shell
+#   dev/run.sh gui             # start the GUI headlessly and screenshot it
 #
-# Go 工具链、缓存都从宿主机挂载，容器本身无状态。
+# The Go toolchain and caches are mounted from the host; the container
+# itself is stateless.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,12 +14,12 @@ IMAGE="${CLOWDER_DEV_IMAGE:-clowder-dev}"
 GO_TC="$HOME/go-toolchain"
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "镜像 $IMAGE 不存在，先构建：" >&2
+  echo "Image $IMAGE does not exist; build it first:" >&2
   echo "  docker build -t $IMAGE -f dev/Dockerfile ." >&2
   exit 1
 fi
 
-# gui 子命令：在 Xvfb 里跑程序，然后截图
+# gui: run the program under Xvfb and take a screenshot
 if [ "${1:-}" = "gui" ]; then
   shift
   TARGET="${1:-./bin/clowder-ui}"
@@ -40,6 +41,8 @@ if [ "${1:-}" = "gui" ]; then
     -e CLOWDER_TAB \
     -e CLOWDER_PAGE \
     -e CLOWDER_DEMO \
+    -e CLOWDER_DEMO_ADDR \
+    -e CLOWDER_TERM_DEMO \
     -e LANG \
     -e LC_ALL \
     "$IMAGE" bash -c "

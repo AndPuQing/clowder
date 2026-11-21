@@ -1,14 +1,17 @@
-// Package ui 是 Clowder 的桌面界面。
+// Package ui implements Clowder's desktop interface.
 //
-// 结构：左侧设备列表，右侧所选设备的详情。
-// 视觉：票根——深墨绿底、米色字、金色点缀；地址是一张可以交给对方的票。
+// Layout: a rail of devices on the left, the selected device's detail on
+// the right. Visual language: a quiet green-and-cream palette with a
+// single gold accent; the tunnel address is the one thing on screen.
 package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,56 +29,124 @@ const (
 	fontUI   = "Noto Sans CJK SC"
 	fontMono = "Noto Sans Mono CJK SC"
 
-	colBg     = "#12221E"
-	colRail   = "#0E1B18"
-	colPanel  = "#182C27"
-	colLine   = "#2A443E"
-	colCream  = "#F2EDE3"
-	colDim    = "#93A9A2"
-	colGold   = "#C9A227"
-	colDanger = "#E0765E"
+	// The palette is a dark, slightly green-neutral set of surfaces, one warm
+	// accent and two semantic colours. Surfaces step up in value so panels
+	// read as raised; hairlines are the only ornament.
+	colBg      = "#101614"
+	colBgTop   = "#151D1A"
+	colRail    = "#0B100E"
+	colRailTop = "#0F1613"
 
-	// Apple 式圆角：控件 11、卡片 14、面板 20
-	radControl = 11
-	radCard    = 14
-	radRow     = 10
-	radPanel   = 20
+	colPanel    = "#18211E"
+	colPanelHi  = "#1D2925"
+	colHover    = "#161F1C"
+	colSelected = "#1B2723"
+
+	colLine   = "#2A3732"
+	colLineHi = "#35463F"
+
+	colCream = "#ECEAE3"
+	colText2 = "#C3CCC7"
+	colDim   = "#8A9992"
+
+	colGold   = "#D6A93C"
+	colGoldHi = "#E5BB55"
+	colGoldLo = "#BE9129"
+	colInk    = "#171A12"
+
+	colGood   = "#6FC49A"
+	colDanger = "#E06C5B"
+
+	// terminal background, darker than the window
+	termBg = "#0A0F0D"
+
+	// Rounded corners: controls 8, cards 12, rows 8, panels 16
+	radControl = 8
+	radCard    = 12
+	radRow     = 8
+	radPanel   = 16
 )
 
-// runtime 是一台设备的运行时状态，不落盘。
-// demoAddr 是演示/截图用的样例地址（不可连接）。
+// demoAddr is a sample address used by the demo/screenshot mode. It is
+// well formed but nobody holds its key, so it can never connect.
 const demoAddr = "kHBrZxJsdB_CPdGdTQxUzc3JDgTJW_mmxyxbhOtfnPYqAeJZzzlYcBUHIYwlLnEdxTlLWpOWFKufsMabNrWXsBcOYnINedlWyHFCwCrAhDLXhwdbHWSYFVOMRBrkaKGtfsQfTLZLhWLKjPqPwdDlj"
 
+const (
+	// saveDelay debounces writes of device and settings changes, so typing
+	// in a field does not rewrite the config on every keystroke.
+	saveDelay = 400 * time.Millisecond
+
+	// maxFileEntries bounds one directory listing in the UI.
+	maxFileEntries = 200
+)
+
+// runtime holds per-device state that is never written to disk.
 type runtime struct {
-	srv    *core.Server
-	cli    *core.Client
-	addr   string
+	srv  *core.Server
+	cli  *core.Client
+	addr string
+
 	errMsg string
-	note   string
 	busy   bool
 	lat    time.Duration
+
+	// clientKey is this peer's node public key, shown so the host can
+	// allow-list it.
+	clientKey string
+
 	qrAddr string
 	qrSrc  myui.ImageSource
 
 	termCmd string
 	termOut string
 	termErr string
+
+	// files is the SFTP session for browsing the host's shared directory.
+	files  *core.Files
+	browse browseState
+
+	// gen identifies the current connection attempt. Results from an
+	// attempt that was stopped or superseded carry an older value and are
+	// discarded (and cleaned up) instead of being published.
+	gen uint64
 }
 
-// App 是界面状态。
+// drafts holds the widget bindings for a device's editable fields. Widgets
+// keep the pointers they are given across renders, so every pointer must
+// point at stable storage rather than into a slice that can be reallocated.
+type drafts struct {
+	name     *string
+	addr     *string
+	exposes  []*string
+	forwards []*string
+	allowed  *string
+	termCmd  *string
+	files    *string
+}
+
+// browseState is the peer's view of the host's shared files.
+type browseState struct {
+	path    string
+	entries []core.FileEntry
+	errMsg  string
+	note    string
+	loading bool
+	seq     uint64 // invalidates results of superseded directory loads
+}
+
+// App is the interface state.
 type App struct {
 	mu      sync.Mutex
 	window  *mygo.Window
-	devices []core.Device
+	devices []*core.Device
 	sel     string
 	rt      map[string]*runtime
+	drafts  map[string]*drafts
 	copied  time.Time
 	theme   *myui.Theme
 
 	tray     *mygo.Tray
 	quitting bool
-
-	allowedDraft map[string]*string
 
 	terms map[string]*termSession
 
@@ -84,9 +155,17 @@ type App struct {
 	socksPortIn  string
 	derpIn       string
 	derpRegionIn string
+
+	// savedDevices/savedSettings mirror what is on disk. The view compares
+	// against them so edits made through widgets (which have no change
+	// callback of their own) are still written back.
+	savedDevices  string
+	savedSettings string
+	saveTimer     *time.Timer
+	saveMu        sync.Mutex // serialises writes to disk
 }
 
-// New 读取设备清单并构造界面状态。
+// New loads the device list and builds the interface state.
 func New() *App {
 	initI18n()
 
@@ -97,23 +176,25 @@ func New() *App {
 
 	a := &App{
 		rt:           map[string]*runtime{},
+		drafts:       map[string]*drafts{},
 		settings:     settings,
 		socksPortIn:  fmt.Sprint(settings.SocksPort),
 		derpIn:       settings.DERPMapURL,
 		derpRegionIn: fmt.Sprint(settings.DERPMapRegion),
 		theme: func() *myui.Theme {
 			t := myui.DarkTheme().WithAccent(myui.Hex(colGold))
-			t.Radius = radControl // 让按钮、输入框、开关统一成同一种圆角
+			t.Radius = radControl // one radius for buttons, fields and switches
 			return t
 		}(),
 	}
 	if list, err := core.LoadDevices(); err == nil {
-		a.devices = list
+		for i := range list {
+			a.devices = append(a.devices, &list[i])
+		}
 	}
 	if len(a.devices) == 0 {
-		list := []core.Device{newDevice(core.RoleHost, T("device.host"))}
-		a.devices = list
-		_ = core.SaveDevices(list)
+		a.devices = []*core.Device{newDevice(core.RoleHost, T("device.host"))}
+		_ = core.SaveDevices(deviceValues(a.devices))
 	}
 	if len(a.devices) > 0 {
 		a.sel = a.devices[0].ID
@@ -122,6 +203,7 @@ func New() *App {
 		peer := newDevice(core.RolePeer, T("device.peer")+" 1")
 		peer.Addr = addr
 		peer.Term = true
+		peer.BrowseFiles = true
 		a.devices = append(a.devices, peer)
 		a.sel = peer.ID
 	}
@@ -130,11 +212,14 @@ func New() *App {
 		peer.Addr = demoAddr
 		a.devices = append(a.devices, peer)
 	}
+	a.savedDevices = marshalDevices(a.devices)
+	a.savedSettings = marshalSettings(a.settings)
 	return a
 }
 
-func newDevice(role, name string) core.Device {
-	d := core.Device{
+// newDevice returns a device with sensible defaults for its role.
+func newDevice(role, name string) *core.Device {
+	d := &core.Device{
 		ID:        core.NewDeviceID(),
 		Name:      name,
 		Role:      role,
@@ -148,19 +233,21 @@ func newDevice(role, name string) core.Device {
 	return d
 }
 
-// Run 启动主循环。
+// Run starts the desktop application.
 func (a *App) Run() error {
 	if os.Getenv("CLOWDER_PAGE") == "settings" {
 		a.showSettings = true
 	}
 	if os.Getenv("CLOWDER_TAB") == "client" {
-		// 兼容旧的调试开关：选中第一台 peer 设备
+		// Kept for the old headless screenshot recipe.
+		a.mu.Lock()
 		for _, d := range a.devices {
 			if d.Role == core.RolePeer {
 				a.sel = d.ID
 				break
 			}
 		}
+		a.mu.Unlock()
 	}
 	mygo.App.WhenReady(func() {
 		a.mu.Lock()
@@ -168,28 +255,39 @@ func (a *App) Run() error {
 		a.mu.Unlock()
 		mygo.App.SetLocale(lang)
 
-		a.window = mygo.NewWindow(mygo.WindowOptions{
+		w := mygo.NewWindow(mygo.WindowOptions{
 			Title:         "Clowder",
 			Width:         1000,
-			Height:        680,
+			Height:        720,
 			MinWidth:      880,
-			MinHeight:     600,
+			MinHeight:     640,
 			TitleBarStyle: mygo.TitleBarHidden,
 			Content:       myui.View(a.view),
 		})
+		if pngIcon := trayIcon(); pngIcon != nil {
+			_ = w.SetIcon(pngIcon)
+		}
+
+		// Publish the window under the lock: background goroutines (the
+		// debounced save, refresh, the tray) read it.
+		a.mu.Lock()
+		a.window = w
+		a.mu.Unlock()
+
 		a.setupTray()
-		a.window.OnClose(func(e *mygo.CloseEvent) {
+		w.OnClose(func(e *mygo.CloseEvent) {
 			a.mu.Lock()
 			quitting := a.quitting
-			a.mu.Unlock()
-			a.mu.Lock()
 			hide := a.settings.CloseToTray
+			hasTray := a.tray != nil
 			a.mu.Unlock()
-			if quitting || a.tray == nil || !hide {
-				return // 没有托盘或没开这项，就正常退出
+			// Always write pending edits before the window goes away.
+			a.persistNow()
+			if quitting || !hasTray || !hide {
+				return // no tray, or the user turned hiding off: quit
 			}
 			e.PreventDefault()
-			a.window.Hide()
+			w.Hide()
 		})
 
 		if v := os.Getenv("CLOWDER_AUTOSTART"); v != "" {
@@ -202,8 +300,11 @@ func (a *App) Run() error {
 	return mygo.App.Run()
 }
 
+// refresh repaints the window and rebuilds the tray menu.
 func (a *App) refresh() {
+	a.mu.Lock()
 	w := a.window
+	a.mu.Unlock()
 	if w == nil {
 		return
 	}
@@ -211,469 +312,699 @@ func (a *App) refresh() {
 	go a.rebuildTrayMenu()
 }
 
-// ---------------------------------------------------------------- 视图
+// ---------------------------------------------------------------- views
 
+// view draws the whole window.
 func (a *App) view(c *myui.Context) {
 	c.SetTheme(a.theme)
 
-	bg := myui.Hex(colBg)
-	cream := myui.Hex(colCream)
-
 	a.mu.Lock()
-	devices := append([]core.Device(nil), a.devices...)
+	devices := append([]*core.Device(nil), a.devices...)
 	sel := a.sel
+	settings := a.showSettings
 	a.mu.Unlock()
 
-	myui.Row(c).Fill().Background(bg).Children(func() {
-		a.rail(c, devices, sel)
+	myui.Row(c).Fill().
+		LinearGradient(myui.LinearGradient{
+			From:  myui.Hex(colBgTop),
+			To:    myui.Hex(colBg),
+			Angle: 150,
+		}).
+		Children(func() {
+			a.rail(c, devices, sel, settings)
 
-		myui.Row(c).Width(1).FillHeight().Background(myui.Hex(colLine))
+			myui.Row(c).Width(1).FillHeight().Background(myui.Hex(colLine))
 
-		myui.Column(c).Grow(1).Fill().Padding(34, 30).Gap(0).Children(func() {
-			myui.Row(c).Height(18).FillWidth().DragWindow()
-			if a.showSettings {
-				a.settingsPane(c)
-				return
-			}
+			myui.Column(c).Grow(1).FillHeight().Children(func() {
+				// The top strip is the window's drag handle.
+				myui.Row(c).Height(34).FillWidth().DragWindow()
 
-			dev, ok := findDevice(devices, sel)
-			if !ok {
-				myui.Row(c).Grow(1)
-				myui.Text(c, T("empty.noSelection")).FontSize(14).TextColor(myui.Hex(colDim))
-				myui.Row(c).Grow(1)
-				return
-			}
-			if dev.Role == core.RoleHost {
-				a.hostDetail(c, dev)
-			} else {
-				a.peerDetail(c, dev)
-			}
-			myui.Text(c, T("hint.windowClose")).
-				FontSize(11.5).TextColor(myui.Hex(colDim)).Padding(18, 0)
-			_ = cream
-		})
-	})
-}
-
-// rail 左侧设备列表
-func (a *App) rail(c *myui.Context, devices []core.Device, sel string) {
-	cream := myui.Hex(colCream)
-	dim := myui.Hex(colDim)
-
-	myui.Column(c).Width(232).Fill().Background(myui.Hex(colRail)).
-		Padding(26, 26).Gap(0).Children(func() {
-		myui.Row(c).Height(18).FillWidth().DragWindow()
-		myui.Text(c, "Clowder").Font(fontUI).FontSize(14).FontWeight(500).
-			TextColor(cream)
-
-		myui.Column(c).Gap(2).Padding(22, 0).Children(func() {
-			for _, d := range devices {
-				d := d
-				selected := d.ID == sel
-				status, statusColor := a.deviceStatus(d)
-				row := myui.Column(c).Gap(3).Padding(9, 11).Radius(radRow).
+				myui.Column(c).Grow(1).FillWidth().Padding(30, 28).
 					Children(func() {
-						name := myui.Text(c, d.Name).FontSize(13).Width(178)
-						label := myui.Text(c, status).FontSize(11).TextColor(statusColor)
-						if selected {
-							name.FontWeight(600).TextColor(cream)
-						} else {
-							name.TextColor(myui.Hex("#C6D2CE"))
-							label.TextColor(dim)
-						}
+						myui.Column(c).FillWidth().MaxWidth(720).Gap(22).
+							Children(func() {
+								if settings {
+									a.settingsPane(c)
+									return
+								}
+
+								dev, ok := findDevice(devices, sel)
+								if !ok {
+									myui.Row(c).Grow(1)
+									iconText(c, "mark", T("empty.noSelection"), 18, 13,
+										myui.Hex(colDim))
+									myui.Row(c).Grow(1)
+									return
+								}
+								// The detail can outgrow the window (terminal,
+								// file browser), so it scrolls.
+								myui.Scroll(c).Grow(1).FillWidth().Children(func() {
+									myui.Column(c).Gap(22).FillWidth().Children(func() {
+										if dev.Role == core.RoleHost {
+											a.hostDetail(c, dev)
+										} else {
+											a.peerDetail(c, dev)
+										}
+										myui.Row(c).Height(12)
+									})
+								})
+							})
 					})
-				row.Cursor(myui.CursorPointer)
-				if row.Hovered() && !selected {
-					row.Background(myui.Hex("#15231F"))
-				}
-				if selected {
-					row.Background(myui.Hex("#1B2E29"))
-				}
-				row.OnClick(func() {
-					a.mu.Lock()
-					a.sel = d.ID
-					a.mu.Unlock()
-					a.refresh()
-				})
-			}
-		})
-
-		myui.Row(c).Grow(1)
-
-		// 新建：两行，左边一条金线作为动作标记
-		addRow := func(label string, role string) {
-			row := myui.Row(c).Gap(8).Padding(6, 0).Children(func() {
-				myui.Row(c).Width(2).Height(12).Background(myui.Hex(colGold))
-				myui.Text(c, label).FontSize(12.5).TextColor(myui.Hex("#C6D2CE"))
 			})
-			row.Cursor(myui.CursorPointer)
-			if row.Hovered() {
-				myui.Text(c, "").FontSize(0)
-			}
-			row.OnClick(func() { a.addDevice(role) })
-		}
-		addRow(T("nav.host"), core.RoleHost)
-		addRow(T("nav.join"), core.RolePeer)
+		})
 
-		settingsRow := myui.Row(c).Gap(8).Padding(14, 0, 0, 0).Children(func() {
-			myui.Text(c, "⚙").FontSize(12).TextColor(dim)
-			myui.Text(c, T("nav.settings")).FontSize(12.5).
-				TextColor(myui.Hex("#C6D2CE"))
-		})
-		settingsRow.Cursor(myui.CursorPointer)
-		settingsRow.OnClick(func() {
-			a.mu.Lock()
-			a.showSettings = true
-			a.mu.Unlock()
-			a.refresh()
-		})
-	})
+	// Widgets write straight into the bound values; catch any change here
+	// and schedule a debounced write.
+	a.persistIfChanged()
 }
 
-// hostDetail 服务端详情
-func (a *App) hostDetail(c *myui.Context, d core.Device) {
+// rail draws the device list on the left.
+func (a *App) rail(c *myui.Context, devices []*core.Device, sel string, settings bool) {
 	cream := myui.Hex(colCream)
+	text2 := myui.Hex(colText2)
 	dim := myui.Hex(colDim)
 	gold := myui.Hex(colGold)
 
-	rt := a.runtimeOf(d.ID)
-	if rt == nil {
-		rt = &runtime{}
-	}
-	running := rt.srv != nil
-	addr := rt.addr
-	if addr == "" && running {
-		addr = rt.srv.Address()
-	}
+	myui.Column(c).Width(252).FillHeight().
+		LinearGradient(myui.LinearGradient{
+			From:  myui.Hex(colRailTop),
+			To:    myui.Hex(colRail),
+			Angle: 180,
+		}).
+		BorderWidth(0, 1, 0, 0).BorderColor(myui.Hex(colLine)).
+		Children(func() {
+			myui.Row(c).Height(34).FillWidth().DragWindow()
 
-	// 标题行 + 动作
-	myui.Row(c).Gap(12).Children(func() {
-		myui.Text(c, d.Name).Font(fontUI).FontSize(24).FontWeight(700).
-			TextColor(cream)
-		myui.Row(c).Grow(1)
-		if running {
-			myui.Toolbar(c, func() {
-				if myui.Button(c, T("action.stop")).Clicked() {
-					a.stopHost(d.ID)
+			// Brand.
+			myui.Row(c).FillWidth().Padding(8, 16).Gap(10).AlignItems(myui.Center).
+				Children(func() {
+					tile := myui.Box(c).Size(26, 26).Radius(7).Center().
+						Background(gold).Shrink(0)
+					tile.Children(func() { iconEl(c, "mark", 17, myui.Hex(colInk)) })
+					myui.Text(c, "Clowder").Font(fontUI).FontSize(15).
+						FontWeight(700).LetterSpacing(-0.2).TextColor(cream)
+				})
+
+			myui.Column(c).FillWidth().Padding(10, 12).Gap(3).Children(func() {
+				myui.Row(c).Padding(4, 8).Children(func() {
+					sectionLabel(c, T("nav.machines"))
+				})
+				for _, d := range devices {
+					d := d
+					selected := d.ID == sel && !settings
+					status, statusColor := a.deviceStatus(d)
+					row := myui.Row(c).FillWidth().Gap(10).AlignItems(myui.Center).
+						Padding(8, 9).Radius(radRow)
+					if selected {
+						row.Background(myui.Hex(colSelected)).
+							BorderWidth(0, 0, 0, 2).BorderColor(gold)
+					} else if row.Hovered() {
+						row.Background(myui.Hex(colHover))
+					}
+					row.Cursor(myui.CursorPointer)
+					row.Children(func() {
+						tile := myui.Box(c).Size(28, 28).Radius(7).Center().Shrink(0)
+						if selected {
+							tile.Background(myui.Hex(colPanelHi))
+						} else {
+							tile.Background(myui.Hex(colPanel))
+						}
+						tile.Children(func() {
+							roleIcon := "host"
+							if d.Role == core.RolePeer {
+								roleIcon = "peer"
+							}
+							fg := text2
+							if selected {
+								fg = cream
+							}
+							iconEl(c, roleIcon, 16, fg)
+						})
+						myui.Column(c).Gap(3).Grow(1).Children(func() {
+							name := myui.Text(c, d.Name).FontSize(13).
+								TextColor(text2).SingleLine().TruncateMiddle()
+							if selected {
+								name.FontWeight(600).TextColor(cream)
+							}
+							myui.Row(c).Gap(5).AlignItems(myui.Center).Children(func() {
+								myui.Box(c).Size(5, 5).Radius(3).
+									Background(statusColor).Shrink(0)
+								myui.Text(c, status).FontSize(10.5).
+									TextColor(dim).SingleLine()
+							})
+						})
+					})
+					row.OnClick(func() {
+						a.mu.Lock()
+						a.sel = d.ID
+						a.showSettings = false
+						a.mu.Unlock()
+						a.refresh()
+					})
 				}
 			})
+
+			myui.Row(c).Grow(1)
+
+			// Footer: creating a machine, then settings.
+			myui.Column(c).FillWidth().Padding(10, 12).Gap(2).Children(func() {
+				myui.Row(c).Height(1).FillWidth().
+					Background(myui.Hex(colLine)).Padding(0, 8)
+
+				addRow := func(name, label string, fn func()) {
+					row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
+						Padding(7, 9).Radius(radRow)
+					row.Cursor(myui.CursorPointer)
+					if row.Hovered() {
+						row.Background(myui.Hex(colHover))
+					}
+					row.Children(func() {
+						iconEl(c, name, 15, dim)
+						myui.Text(c, label).FontSize(12.5).
+							TextColor(text2).SingleLine()
+					})
+					row.OnClick(fn)
+				}
+				addRow("plus", T("nav.host"), func() { a.addDevice(core.RoleHost) })
+				addRow("plus", T("nav.join"), func() { a.addDevice(core.RolePeer) })
+
+				row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
+					Padding(7, 9).Radius(radRow)
+				row.Cursor(myui.CursorPointer)
+				fg := text2
+				if settings {
+					row.Background(myui.Hex(colSelected))
+					fg = cream
+				} else if row.Hovered() {
+					row.Background(myui.Hex(colHover))
+				}
+				row.Children(func() {
+					iconEl(c, "settings", 15, fg)
+					myui.Text(c, T("nav.settings")).FontSize(12.5).
+						TextColor(fg).SingleLine()
+				})
+				row.OnClick(func() {
+					a.mu.Lock()
+					a.showSettings = true
+					a.mu.Unlock()
+					a.refresh()
+				})
+			})
+		})
+}
+
+// hostDetail draws the "share a port" side of a device.
+func (a *App) hostDetail(c *myui.Context, d *core.Device) {
+	cream := myui.Hex(colCream)
+	text2 := myui.Hex(colText2)
+	dim := myui.Hex(colDim)
+	gold := myui.Hex(colGold)
+
+	// Sharing files is part of the SSH service; keep the two switches
+	// consistent when SSH is turned off.
+	if !d.SSH && d.Files {
+		d.Files = false
+	}
+
+	rt := a.runtimeSnapshot(d.ID)
+	running := rt.srv != nil
+	addr := rt.addr
+	dr := a.deviceDrafts(d)
+	status, statusColor := a.deviceStatus(d)
+
+	// Header.
+	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
+		headerTile(c, "host", gold)
+		myui.Column(c).Gap(6).Grow(1).Children(func() {
+			if myui.TextInputBase(c, dr.name).Font(fontUI).FontSize(22).
+				FontWeight(700).LetterSpacing(-0.4).TextColor(cream).FillWidth().MaxWidth(300).Changed() {
+				a.renameDevice(d, dr, *dr.name)
+			}
+			statusChip(c, status, statusColor)
+		})
+
+		if running {
+			if actionButton(c, btnQuiet, "stop", T("action.stop")).Clicked() {
+				a.stopHost(d.ID)
+			}
 		} else if !rt.busy {
-			if myui.PrimaryButton(c, T("action.ticket")).Width(96).Clicked() {
+			if actionButton(c, btnSolid, "share", T("action.ticket")).Clicked() {
 				a.startHost(d.ID)
 			}
 		}
-		myui.Toolbar(c, func() {
-			if myui.Button(c, T("action.remove")).Clicked() {
-				a.removeDevice(d.ID)
-			}
-		})
+		if actionButton(c, btnDanger, "trash", T("action.remove")).Clicked() {
+			a.removeDevice(d.ID)
+		}
 	})
 
-	myui.Column(c).Padding(14, 0).Children(func() {
-		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
-	})
+	if rt.errMsg != "" {
+		notice(c, "alert", rt.errMsg, myui.Hex(colDanger))
+	}
 
+	// The address, once the host is up.
 	if running && addr != "" {
-		myui.Row(c).Padding(22, 0).Children(func() {
-			myui.Row(c).Padding(24).Background(myui.Hex(colPanel)).Radius(radPanel).
-				Gap(22).Width(600).Children(func() {
-				myui.Column(c).Padding(10).Background(myui.Hex("#FFFFFF")).
-					Radius(radCard).Children(func() {
+		ticket := panel(c, 0).Padding(18)
+		ticket.Children(func() {
+			myui.Row(c).Gap(18).Children(func() {
+				box := myui.Column(c).Padding(8).Background(myui.Hex("#FFFFFF")).
+					Radius(radControl).Shrink(0)
+				box.Children(func() {
 					if src := a.qrImage(d.ID, addr); src != nil {
-						myui.Image(c, src).Size(150, 150)
+						myui.Image(c, src).Size(136, 136)
 					}
 				})
 
-				myui.Row(c).Width(1).Height(150).Background(myui.Hex(colLine))
-
-				myui.Column(c).Gap(9).Grow(1).Children(func() {
-					myui.Text(c, T("ticket.title")).FontSize(23).FontWeight(700).
-						TextColor(cream)
-					myui.Text(c, T("ticket.hint")).FontSize(12).TextColor(dim)
-					myui.Text(c, a.wrapAddr(addr)).Font(fontMono).FontSize(10.5).
-						TextColor(myui.Hex("#C6D2CE"))
-
+				myui.Column(c).Gap(10).Grow(1).Children(func() {
+					sectionLabel(c, T("ticket.title"))
+					myui.Text(c, hardWrap(addr, 66)).Font(fontMono).FontSize(10.5).
+						TextColor(text2)
+					myui.Row(c).Height(2)
 					label := T("action.copy")
 					if time.Since(a.copiedTime()) < 2*time.Second {
 						label = T("action.copied")
 					}
-					copyW := float32(112)
-					if IsEnglish() {
-						copyW = 150
-					}
-					if myui.PrimaryButton(c, label).Width(copyW).Clicked() {
-						_ = mygo.Clipboard.Write(transfer.TextData(addr))
-						a.markCopied()
-					}
-					myui.Text(c, T("ticket.expiry")).FontSize(11).TextColor(gold)
+					myui.Row(c).Children(func() {
+						if actionButton(c, btnSolid, "copy", label).Clicked() {
+							_ = mygo.Clipboard.Write(transfer.TextData(addr))
+							a.markCopied()
+						}
+					})
 				})
 			})
-		})
-	} else {
-		myui.Column(c).Gap(6).Padding(20, 0).Children(func() {
-			myui.Text(c, T("host.emptyTitle")).FontSize(20).FontWeight(600).TextColor(cream)
-			myui.Text(c, T("host.emptyHint")).
-				FontSize(12.5).TextColor(dim)
 		})
 	}
 
-	// 端口
-	myui.Column(c).Gap(8).FillWidth().Padding(22, 0).Children(func() {
-		myui.Text(c, T("section.ports")).FontSize(11).FontWeight(600).TextColor(dim)
-		for i := range a.devices {
-			if a.devices[i].ID != d.ID {
-				continue
-			}
-			for j := range a.devices[i].Exposes {
-				i, j := i, j
-				if running {
-					myui.Text(c, a.devices[i].Exposes[j]).Font(fontMono).
-						FontSize(12.5).TextColor(myui.Hex("#C6D2CE"))
-					continue
-				}
-				myui.Row(c).Gap(8).Children(func() {
-					myui.TextInput(c, &a.devices[i].Exposes[j]).Width(260)
-					if len(a.devices[i].Exposes) > 1 {
-						myui.Toolbar(c, func() {
-							if myui.Button(c, T("action.removeItem")).Clicked() {
-								a.removeExpose(i, j)
-							}
-						})
-					}
-				})
-			}
-		}
-		if !running {
-			myui.Toolbar(c, func() {
-				if myui.Button(c, T("action.addPort")).Clicked() {
+	// Ports.
+	ports := panel(c, 0).Padding(16).Gap(10)
+	ports.Children(func() {
+		myui.Row(c).AlignItems(myui.Center).Children(func() {
+			sectionLabel(c, T("section.ports"))
+			myui.Row(c).Grow(1)
+			if !running {
+				if iconButton(c, "plus", dim).Label(T("action.addPort")).Clicked() {
 					a.addExpose(d.ID)
 				}
+			}
+		})
+		for j := range d.Exposes {
+			j := j
+			myui.Row(c).FillWidth().Gap(8).AlignItems(myui.Center).Children(func() {
+				iconEl(c, "hash", 15, dim)
+				if running {
+					myui.Text(c, d.Exposes[j]).Font(fontMono).FontSize(12.5).
+						TextColor(text2).Grow(1)
+					return
+				}
+				if myui.TextInput(c, dr.exposes[j]).Width(300).
+					Placeholder(T("placeholder.expose")).Changed() {
+					d.Exposes[j] = *dr.exposes[j]
+					a.persistSoon()
+				}
+				myui.Row(c).Grow(1)
+				if len(d.Exposes) > 1 {
+					if iconButton(c, "x", dim).Label(T("action.removeItem")).Clicked() {
+						a.removeExpose(d.ID, j)
+					}
+				}
 			})
-			myui.Row(c).Gap(10).Children(func() {
-				myui.Switch(c, a.persistentOf(d.ID))
-				myui.Text(c, T("opt.persistent")).FontSize(12).TextColor(cream)
-				myui.Text(c, T("opt.persistentHint")).FontSize(11).
-					TextColor(dim)
-			})
+		}
+		if !running {
+			myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
+			switchRow(c, "key", T("opt.persistent"), &d.Persistent)
 		}
 	})
 
 	if !running {
-		myui.Column(c).Gap(10).FillWidth().Padding(18, 0).Children(func() {
-			myui.Row(c).Gap(10).Children(func() {
-				myui.Switch(c, a.udpOf(d.ID))
-				myui.Text(c, T("opt.udp")).FontSize(12).TextColor(cream)
-			})
-			myui.Row(c).Gap(10).Children(func() {
-				myui.Switch(c, a.proxyOf(d.ID))
-				myui.Text(c, T("opt.allowProxy")).FontSize(12).TextColor(cream)
-			})
-			myui.Row(c).Gap(10).Children(func() {
-				myui.Switch(c, a.sshOf(d.ID))
-				myui.Text(c, T("opt.ssh")).FontSize(12).TextColor(cream)
-			})
-			myui.Column(c).Gap(6).Width(420).Children(func() {
-				myui.Text(c, T("opt.allowedClients")).FontSize(11).TextColor(dim)
-				myui.TextInput(c, a.allowedOf(d.ID))
+		opts := panel(c, 0).Padding(6, 0).Gap(1).
+			Dividers(1, myui.Hex(colLine))
+		opts.Children(func() {
+			switchRow(c, "radio", T("opt.udp"), &d.UDP)
+			switchRow(c, "globe", T("opt.allowProxy"), &d.AllowProxy)
+			switchRow(c, "terminal", T("opt.ssh"), &d.SSH)
+			if d.SSH {
+				switchRow(c, "folder", T("opt.files"), &d.Files)
+				if d.Files {
+					myui.Column(c).Gap(6).Padding(10, 36).Children(func() {
+						fieldLabel(c, T("opt.filesDir"))
+						if myui.TextInput(c, dr.files).FillWidth().
+							Placeholder(T("placeholder.filesDir")).Changed() {
+							d.FileDir = *dr.files
+							a.persistSoon()
+						}
+					})
+				}
+			}
+			myui.Column(c).Gap(6).Padding(12, 12).Children(func() {
+				fieldLabel(c, T("opt.allowedClients"))
+				if myui.TextInput(c, dr.allowed).FillWidth().
+					Placeholder(T("placeholder.allowedClients")).Changed() {
+					d.AllowedClients = splitKeys(*dr.allowed)
+					a.persistSoon()
+				}
 			})
 		})
 	}
-
-	if rt.errMsg != "" {
-		myui.Text(c, rt.errMsg).FontSize(12).TextColor(myui.Hex(colDanger)).
-			Padding(0, 14, 0, 0)
-	}
-	if rt.busy {
-		myui.Text(c, T("status.connectingRelay")).FontSize(12).TextColor(gold).
-			Padding(0, 14, 0, 0)
-	}
 }
 
-// peerDetail 客户端详情
-func (a *App) peerDetail(c *myui.Context, d core.Device) {
+// peerDetail draws the "connect to a peer" side of a device.
+func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 	cream := myui.Hex(colCream)
+	text2 := myui.Hex(colText2)
 	dim := myui.Hex(colDim)
 	gold := myui.Hex(colGold)
-	green := myui.Hex("#5FBF8F")
 
-	rt := a.runtimeOf(d.ID)
-	if rt == nil {
-		rt = &runtime{}
-	}
+	rt := a.runtimeSnapshot(d.ID)
 	connected := rt.cli != nil
+	dr := a.deviceDrafts(d)
+	status, statusColor := a.deviceStatus(d)
 
-	myui.Row(c).Gap(12).Children(func() {
-		myui.Text(c, d.Name).Font(fontUI).FontSize(24).FontWeight(700).
-			TextColor(cream)
-		if connected {
-			myui.Text(c, fmt.Sprintf("已连接 %v", rt.lat.Round(time.Millisecond))).
-				FontSize(11.5).TextColor(green)
-		}
-		myui.Row(c).Grow(1)
-		if connected {
-			myui.Toolbar(c, func() {
-				if myui.Button(c, T("action.disconnect")).Clicked() {
-					a.stopPeer(d.ID)
+	// Header.
+	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
+		headerTile(c, "peer", gold)
+		myui.Column(c).Gap(6).Grow(1).Children(func() {
+			if myui.TextInputBase(c, dr.name).Font(fontUI).FontSize(22).
+				FontWeight(700).LetterSpacing(-0.4).TextColor(cream).FillWidth().MaxWidth(300).Changed() {
+				a.renameDevice(d, dr, *dr.name)
+			}
+			myui.Row(c).Gap(10).AlignItems(myui.Center).Children(func() {
+				statusChip(c, status, statusColor)
+				if connected {
+					myui.Text(c, rt.lat.Round(time.Millisecond).String()).
+						Font(fontMono).FontSize(10.5).FontFeatures("tnum").TextColor(dim)
 				}
 			})
+		})
+
+		if connected {
+			if actionButton(c, btnQuiet, "x", T("action.disconnect")).Clicked() {
+				a.stopPeer(d.ID)
+			}
 		} else if !rt.busy {
-			if myui.PrimaryButton(c, T("action.connect")).Width(96).Clicked() {
+			if actionButton(c, btnSolid, "connect", T("action.connect")).Clicked() {
 				a.startPeer(d.ID)
 			}
 		}
-		myui.Toolbar(c, func() {
-			if myui.Button(c, T("action.remove")).Clicked() {
-				a.removeDevice(d.ID)
-			}
-		})
-	})
-
-	myui.Column(c).Padding(14, 0).Children(func() {
-		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
-	})
-
-	myui.Column(c).Gap(10).FillWidth().Padding(24, 0).Children(func() {
-		myui.Text(c, T("section.peerAddr")).FontSize(11).FontWeight(600).TextColor(dim)
-		if connected {
-			myui.Text(c, d.Addr).Font(fontMono).FontSize(10.5).
-				FillWidth().TextColor(myui.Hex("#C6D2CE"))
-		} else {
-			myui.TextInput(c, a.addressOf(d.ID))
+		if actionButton(c, btnDanger, "trash", T("action.remove")).Clicked() {
+			a.removeDevice(d.ID)
 		}
 	})
 
-	myui.Column(c).Gap(8).FillWidth().Padding(22, 0).Children(func() {
-		myui.Text(c, T("section.mapping")).FontSize(11).FontWeight(600).TextColor(dim)
-		for i := range a.devices {
-			if a.devices[i].ID != d.ID {
-				continue
-			}
-			for j := range a.devices[i].Forwards {
-				i, j := i, j
-				if connected {
-					myui.Text(c, a.devices[i].Forwards[j]).Font(fontMono).
-						FontSize(12.5).TextColor(myui.Hex("#C6D2CE"))
-					continue
+	if rt.errMsg != "" {
+		notice(c, "alert", rt.errMsg, myui.Hex(colDanger))
+	}
+
+	// Address.
+	address := panel(c, 0).Padding(16).Gap(9)
+	address.Children(func() {
+		row := myui.Row(c).Gap(8).AlignItems(myui.Center)
+		row.Children(func() {
+			iconEl(c, "connect", 15, dim)
+			sectionLabel(c, T("section.peerAddr"))
+			myui.Row(c).Grow(1)
+			if connected {
+				if iconButton(c, "copy", dim).Label(T("action.copy")).Clicked() {
+					_ = mygo.Clipboard.Write(transfer.TextData(d.Addr))
+					a.markCopied()
 				}
-				myui.Row(c).Gap(8).Children(func() {
-					myui.TextInput(c, &a.devices[i].Forwards[j]).Width(260)
-					if len(a.devices[i].Forwards) > 1 {
-						myui.Toolbar(c, func() {
-							if myui.Button(c, T("action.removeItem")).Clicked() {
-								a.removeForward(i, j)
-							}
-						})
+			}
+		})
+		if connected {
+			myui.Text(c, hardWrap(d.Addr, 92)).Font(fontMono).FontSize(10.5).
+				TextColor(text2)
+		} else if myui.TextInput(c, dr.addr).FillWidth().
+			Placeholder(T("placeholder.addr")).Changed() {
+			d.Addr = *dr.addr
+			a.persistSoon()
+		}
+	})
+
+	// Client key, so the host can allow-list this peer.
+	if !connected {
+		if key := a.ensureClientKey(d.ID); key != "" {
+			keyCard := panel(c, 0).Padding(16).Gap(8)
+			keyCard.Children(func() {
+				myui.Row(c).AlignItems(myui.Center).Children(func() {
+					iconText(c, "key", T("peer.clientKey"), 15, 11, dim)
+					myui.Row(c).Grow(1)
+					if iconButton(c, "copy", dim).Label(T("action.copyKey")).Clicked() {
+						_ = mygo.Clipboard.Write(transfer.TextData(key))
+						a.markCopied()
 					}
 				})
-			}
+				myui.Text(c, hardWrap(key, 64)).Font(fontMono).FontSize(10.5).
+					TextColor(text2)
+			})
 		}
-		if !connected {
-			myui.Toolbar(c, func() {
-				if myui.Button(c, T("action.addMapping")).Clicked() {
+	}
+
+	// Port mapping.
+	mapping := panel(c, 0).Padding(16).Gap(10)
+	mapping.Children(func() {
+		myui.Row(c).AlignItems(myui.Center).Children(func() {
+			sectionLabel(c, T("section.mapping"))
+			myui.Row(c).Grow(1)
+			if !connected {
+				if iconButton(c, "plus", dim).Label(T("action.addMapping")).Clicked() {
 					a.addForward(d.ID)
+				}
+			}
+		})
+		for j := range d.Forwards {
+			j := j
+			myui.Row(c).FillWidth().Gap(8).AlignItems(myui.Center).Children(func() {
+				iconEl(c, "connect", 15, dim)
+				if connected {
+					myui.Text(c, d.Forwards[j]).Font(fontMono).FontSize(12.5).
+						TextColor(text2).Grow(1)
+					return
+				}
+				if myui.TextInput(c, dr.forwards[j]).Width(300).
+					Placeholder(T("placeholder.forward")).Changed() {
+					d.Forwards[j] = *dr.forwards[j]
+					a.persistSoon()
+				}
+				myui.Row(c).Grow(1)
+				if len(d.Forwards) > 1 {
+					if iconButton(c, "x", dim).Label(T("action.removeItem")).Clicked() {
+						a.removeForward(d.ID, j)
+					}
 				}
 			})
 		}
 	})
 
-	if connected && a.termOf(d.ID) == nil {
-		myui.Column(c).Gap(8).FillWidth().Padding(20, 0).Children(func() {
-			myui.Text(c, T("term.title")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-
-			myui.Row(c).Gap(10).Children(func() {
-				myui.TextInput(c, a.termCmdOf(d.ID)).Width(360)
-				if myui.PrimaryButton(c, T("term.run")).Width(88).Clicked() {
-					a.runRemoteCommand(d.ID)
-				}
-			})
-
-			rt := a.runtimeOf(d.ID)
-			body := T("term.empty")
-			if rt != nil && rt.termOut != "" {
-				body = rt.termOut
+	if !connected {
+		opts := panel(c, 0).Padding(6, 0).Gap(1).
+			Dividers(1, myui.Hex(colLine))
+		opts.Children(func() {
+			switchRow(c, "radio", T("opt.udp"), &d.UDP)
+			switchRow(c, "globe", T("opt.socks"), &d.Socks)
+			if d.Socks {
+				myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(2, 38).Children(func() {
+					iconEl(c, "network", 14, dim)
+					myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(10.5).
+						TextColor(text2)
+				})
 			}
-			myui.Column(c).Padding(12).Radius(radCard).
-				Background(myui.Hex(colPanel)).Width(560).Children(func() {
-				myui.Text(c, body).Font(fontMono).FontSize(11).
-					TextColor(myui.Hex("#C6D2CE"))
-			})
-			if rt != nil && rt.termErr != "" {
-				myui.Text(c, rt.termErr).FontSize(11.5).
-					TextColor(myui.Hex(colDanger))
+			switchRow(c, "folder", T("opt.browse"), &d.BrowseFiles)
+			if core.TerminalAvailable() {
+				switchRow(c, "terminal", T("opt.term"), &d.Term)
 			}
 		})
 	}
 
-	if !connected && core.TerminalAvailable() {
-		myui.Row(c).Gap(10).Padding(16, 0).Children(func() {
-			myui.Switch(c, a.termPtr(d.ID))
-			myui.Text(c, T("opt.term")).FontSize(12).TextColor(cream)
-			myui.Text(c, T("term.hint")).FontSize(11).TextColor(dim)
-		})
-	}
-
+	// Interactive terminal.
 	if connected && a.termOf(d.ID) != nil {
-		myui.Column(c).Gap(8).FillWidth().Padding(18, 0).Children(func() {
-			myui.Text(c, T("term.live")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-			a.terminalPane(c, d)
-
-			row := myui.Row(c).Gap(10).Children(func() {
-				myui.TextInput(c, a.termCmdOf(d.ID)).Width(420)
-				if myui.PrimaryButton(c, T("term.send")).Width(96).Clicked() {
+		term := panel(c, 0).Padding(16).Gap(10)
+		term.Children(func() {
+			iconText(c, "terminal", T("term.live"), 15, 11, dim)
+			a.terminalPane(c, d.ID)
+			myui.Row(c).Gap(8).Children(func() {
+				myui.TextInput(c, dr.termCmd).Grow(1).
+					Placeholder(T("term.placeholder"))
+				if actionButton(c, btnSolid, "send", T("term.send")).Clicked() {
 					a.sendTermLine(d.ID)
 				}
 			})
-			_ = row
 		})
 	}
 
-	if !connected {
-		myui.Row(c).Gap(10).Padding(16, 0).Children(func() {
-			myui.Switch(c, a.socksOf(d.ID))
-			myui.Text(c, T("opt.socks")).FontSize(12).TextColor(cream)
-			myui.Text(c, "127.0.0.1:1080").Font(fontMono).FontSize(11).TextColor(dim)
+	if connected && d.BrowseFiles {
+		a.filesPanel(c, d.ID)
+	}
+	// Remote shell, when the tunnel is up and no interactive terminal runs.
+	if connected && a.termOf(d.ID) == nil {
+		shell := panel(c, 0).Padding(16).Gap(10)
+		shell.Children(func() {
+			iconText(c, "terminal", T("term.title"), 15, 11, dim)
+			myui.Row(c).Gap(8).Children(func() {
+				myui.TextInput(c, dr.termCmd).Grow(1).
+					Placeholder(T("term.placeholder"))
+				if actionButton(c, btnSolid, "play", T("term.run")).Clicked() {
+					a.runRemoteCommand(d.ID)
+				}
+			})
+			body := T("term.empty")
+			if rt.termOut != "" {
+				body = rt.termOut
+			}
+			myui.Column(c).FillWidth().Padding(12).Radius(radControl).
+				Background(myui.Hex(termBg)).Border(1, myui.Hex(colLine)).
+				Children(func() {
+					myui.Text(c, body).Font(fontMono).FontSize(11).
+						TextColor(text2)
+				})
+			if rt.termErr != "" {
+				notice(c, "alert", rt.termErr, myui.Hex(colDanger))
+			}
 		})
 	}
 
-	if rt.errMsg != "" {
-		myui.Text(c, rt.errMsg).FontSize(12).TextColor(myui.Hex(colDanger)).
-			Padding(0, 14, 0, 0)
-	}
-	if rt.note != "" {
-		myui.Text(c, rt.note).FontSize(12).TextColor(gold).
-			Padding(0, 10, 0, 0)
+	if connected && d.Socks {
+		line := myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(0, 2)
+		line.Children(func() {
+			iconEl(c, "network", 14, dim)
+			myui.Text(c, "SOCKS5").FontSize(11.5).TextColor(dim)
+			myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(10.5).
+				TextColor(text2)
+		})
 	}
 }
 
-// ---------------------------------------------------------------- 行为
+// ---------------------------------------------------------------- state helpers
 
-func findDevice(list []core.Device, id string) (core.Device, bool) {
+// deviceValues copies the pointer list into values for persistence.
+func deviceValues(list []*core.Device) []core.Device {
+	out := make([]core.Device, len(list))
+	for i, d := range list {
+		out[i] = *d
+		// Copy the slices too: the returned values must not share storage
+		// with fields the widgets write to.
+		out[i].Exposes = append([]string(nil), d.Exposes...)
+		out[i].Forwards = append([]string(nil), d.Forwards...)
+		out[i].AllowedClients = append([]string(nil), d.AllowedClients...)
+	}
+	return out
+}
+
+// findDevice looks a device up by id in a snapshot.
+func findDevice(list []*core.Device, id string) (*core.Device, bool) {
 	for _, d := range list {
 		if d.ID == id {
 			return d, true
 		}
 	}
-	return core.Device{}, false
+	return nil, false
 }
 
-func (a *App) runtimeOf(id string) *runtime {
+// deviceByID returns the live device record, if it exists.
+func (a *App) deviceByID(id string) *core.Device {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.rt[id]
+	return a.deviceByIDLocked(id)
 }
 
-func (a *App) ensureRuntime(id string) *runtime {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *App) deviceByIDLocked(id string) *core.Device {
+	for _, d := range a.devices {
+		if d.ID == id {
+			return d
+		}
+	}
+	return nil
+}
+
+// runtimeLocked returns (creating if needed) the runtime for a device.
+// The caller must hold a.mu.
+func (a *App) runtimeLocked(id string) *runtime {
 	if a.rt == nil {
 		a.rt = map[string]*runtime{}
 	}
-	if a.rt[id] == nil {
-		a.rt[id] = &runtime{}
+	rt := a.rt[id]
+	if rt == nil {
+		rt = &runtime{}
+		a.rt[id] = rt
 	}
-	return a.rt[id]
+	return rt
+}
+
+// runtimeSnapshot copies a runtime for rendering, so the view never reads
+// fields that a background goroutine may be writing.
+func (a *App) runtimeSnapshot(id string) runtime {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if rt := a.rt[id]; rt != nil {
+		return *rt
+	}
+	return runtime{}
+}
+
+// deviceDrafts returns the stable widget bindings for a device.
+func (a *App) deviceDrafts(d *core.Device) *drafts {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.draftsLocked(d)
+}
+
+// draftsLocked returns the drafts for d, growing or shrinking the row lists
+// to match the device. The caller must hold a.mu.
+func (a *App) draftsLocked(d *core.Device) *drafts {
+	dr := a.drafts[d.ID]
+	if dr == nil {
+		dr = &drafts{
+			name:    new(string),
+			addr:    new(string),
+			allowed: new(string),
+			termCmd: new(string),
+			files:   new(string),
+		}
+		*dr.name = d.Name
+		*dr.addr = d.Addr
+		*dr.allowed = strings.Join(d.AllowedClients, " ")
+		*dr.files = d.FileDir
+		a.drafts[d.ID] = dr
+	}
+	dr.exposes = resizeDrafts(dr.exposes, d.Exposes)
+	dr.forwards = resizeDrafts(dr.forwards, d.Forwards)
+	return dr
+}
+
+// resizeDrafts makes room for values, keeping existing pointers stable.
+func resizeDrafts(list []*string, values []string) []*string {
+	for len(list) < len(values) {
+		p := new(string)
+		*p = values[len(list)]
+		list = append(list, p)
+	}
+	return list[:len(values)]
+}
+
+// ensureClientKey returns (creating on first use) this peer's persistent
+// node public key, so the host can allow-list it.
+func (a *App) ensureClientKey(id string) string {
+	a.mu.Lock()
+	if rt := a.rt[id]; rt != nil && rt.clientKey != "" {
+		key := rt.clientKey
+		a.mu.Unlock()
+		return key
+	}
+	a.mu.Unlock()
+
+	k, _, err := core.LoadOrCreateKey("device-" + id)
+	if err != nil {
+		return ""
+	}
+	key := k.PublicKey()
+
+	a.mu.Lock()
+	a.runtimeLocked(id).clientKey = key
+	a.mu.Unlock()
+	return key
+}
+
+func (a *App) socksAddr() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return fmt.Sprintf("127.0.0.1:%d", a.settings.SocksPort)
 }
 
 func (a *App) copiedTime() time.Time {
@@ -690,169 +1021,78 @@ func (a *App) markCopied() {
 	time.AfterFunc(2*time.Second, a.refresh)
 }
 
-// persistentOf 返回设备 persistent 字段的指针，供 Switch 修改。
-func (a *App) persistentOf(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].Persistent
-		}
-	}
-	// 兜底：返回一个临时值，避免 panic
-	return new(bool)
-}
-
-// udpOf / proxyOf / socksOf / allowedOf 返回设备选项的指针，供控件直接修改。
-func (a *App) udpOf(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].UDP
-		}
-	}
-	return new(bool)
-}
-
-func (a *App) proxyOf(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].AllowProxy
-		}
-	}
-	return new(bool)
-}
-
-func (a *App) socksOf(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].Socks
-		}
-	}
-	return new(bool)
-}
-
-// sshOf 返回 host 的 SSH 开关指针。
-func (a *App) sshOf(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].SSH
-		}
-	}
-	return new(bool)
-}
-
-// termPtr 返回设备的「打开交互终端」开关。
-func (a *App) termPtr(id string) *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].Term
-		}
-	}
-	return new(bool)
-}
-
-// sendTermLine 把输入框的一行发给远端 shell。
+// sendTermLine sends the command field as a line to the remote shell.
 func (a *App) sendTermLine(id string) {
-	ts := a.termOf(id)
-	rt := a.ensureRuntime(id)
-
-	a.mu.Lock()
-	line := rt.termCmd
-	rt.termCmd = ""
-	a.mu.Unlock()
-
-	if ts != nil && line != "" {
+	d := a.deviceByID(id)
+	if d == nil {
+		return
+	}
+	dr := a.deviceDrafts(d)
+	line := *dr.termCmd
+	*dr.termCmd = ""
+	if ts := a.termOf(id); ts != nil && line != "" {
 		ts.send(line + "\r")
 	}
 	a.refresh()
 }
 
-// termCmdOf 返回该设备终端输入框绑定的字符串。
-func (a *App) termCmdOf(id string) *string {
-	rt := a.ensureRuntime(id)
-	return &rt.termCmd
-}
-
-// runRemoteCommand 在对方机器上执行命令，结果写进终端区。
+// runRemoteCommand runs one command through the established tunnel client.
 func (a *App) runRemoteCommand(id string) {
-	rt := a.ensureRuntime(id)
+	d := a.deviceByID(id)
+	if d == nil {
+		return
+	}
+	dr := a.deviceDrafts(d)
 
 	a.mu.Lock()
-	cmd := strings.TrimSpace(rt.termCmd)
-	var addr string
-	for _, d := range a.devices {
-		if d.ID == id {
-			addr = d.Addr
-		}
-	}
+	cmd := strings.TrimSpace(*dr.termCmd)
+	rt := a.runtimeLocked(id)
+	client := rt.cli
 	rt.termErr = ""
+	if cmd != "" {
+		rt.termOut = "…"
+	}
 	a.mu.Unlock()
 
 	if cmd == "" {
 		return
 	}
-	if addr == "" {
+	if client == nil {
 		a.mu.Lock()
-		rt.termErr = "还没有对方的地址"
+		rt := a.runtimeLocked(id)
+		rt.termErr = "connect to the peer first"
 		a.mu.Unlock()
 		a.refresh()
 		return
 	}
-
-	a.mu.Lock()
-	rt.termOut = "…"
-	a.mu.Unlock()
 	a.refresh()
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		out, err := core.SSHExec(ctx, addr, cmd)
+
+		var out string
+		var err error
+		conn, derr := client.Dial(core.SSHPort, 20*time.Second)
+		if derr != nil {
+			err = derr
+		} else {
+			out, err = core.SSHExecConn(ctx, conn, cmd)
+		}
 
 		a.mu.Lock()
-		rt.termOut = out
-		if err != nil {
-			rt.termErr = err.Error()
+		if rt := a.rt[id]; rt != nil {
+			rt.termOut = out
+			if err != nil {
+				rt.termErr = err.Error()
+			}
 		}
 		a.mu.Unlock()
 		a.refresh()
 	}()
 }
 
-// allowedOf 把白名单数组折叠成一行文本供编辑。
-func (a *App) allowedOf(id string) *string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			if a.allowedDraft == nil {
-				a.allowedDraft = map[string]*string{}
-			}
-			if v, ok := a.allowedDraft[id]; ok {
-				v := v
-				a.devices[i].AllowedClients = splitKeys(*v)
-				return v
-			}
-			joined := strings.Join(a.devices[i].AllowedClients, " ")
-			a.allowedDraft[id] = &joined
-			return &joined
-		}
-	}
-	v := new(string)
-	return v
-}
-
-// splitKeys 把用户输入拆成公钥列表。
+// splitKeys splits the allow-list text into individual public keys.
 func splitKeys(s string) []string {
 	fields := strings.FieldsFunc(s, func(r rune) bool {
 		return r == ',' || r == ';' || r == '\n' || r == ' ' || r == '\t'
@@ -866,32 +1106,46 @@ func splitKeys(s string) []string {
 	return out
 }
 
-// addressOf 返回设备地址字段的指针，供 TextInput 修改。
-func (a *App) addressOf(id string) *string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			return &a.devices[i].Addr
+// ---------------------------------------------------------------- mutations
+
+// renameDevice stores a new display name for a device. An empty name falls
+// back to a placeholder so the rail never shows a blank row.
+func (a *App) renameDevice(d *core.Device, dr *drafts, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Untitled"
+		if dr != nil {
+			*dr.name = name
 		}
 	}
-	return new(string)
+	a.mu.Lock()
+	if cur := a.deviceByIDLocked(d.ID); cur != nil {
+		cur.Name = name
+	}
+	a.mu.Unlock()
+
+	a.persistSoon()
+	a.refresh()
 }
 
 func (a *App) addDevice(role string) {
+	a.mu.Lock()
 	name := T("device.host")
 	if role == core.RolePeer {
 		name = T("device.peer")
 	}
-	d := newDevice(role, fmt.Sprintf("%s %d", name, len(a.devices)+1))
-
-	a.mu.Lock()
+	n := 0
+	for _, d := range a.devices {
+		if d.Role == role {
+			n++
+		}
+	}
+	d := newDevice(role, fmt.Sprintf("%s %d", name, n+1))
 	a.devices = append(a.devices, d)
 	a.sel = d.ID
-	list := append([]core.Device(nil), a.devices...)
 	a.mu.Unlock()
 
-	_ = core.SaveDevices(list)
+	a.persistNow()
 	a.refresh()
 }
 
@@ -907,72 +1161,153 @@ func (a *App) removeDevice(id string) {
 		}
 	}
 	a.devices = out
-	delete(a.rt, id)
+	if rt := a.rt[id]; rt != nil {
+		rt.gen++ // invalidate any in-flight attempt
+		delete(a.rt, id)
+	}
+	delete(a.drafts, id)
 	if a.sel == id && len(a.devices) > 0 {
 		a.sel = a.devices[0].ID
 	}
-	list := append([]core.Device(nil), a.devices...)
 	a.mu.Unlock()
 
-	_ = core.SaveDevices(list)
+	a.persistNow()
 	a.refresh()
 }
 
-func (a *App) save() {
+// persistSoon schedules a debounced save.
+func (a *App) persistSoon() {
 	a.mu.Lock()
-	list := append([]core.Device(nil), a.devices...)
+	if a.saveTimer != nil {
+		a.saveTimer.Stop()
+	}
+	a.saveTimer = time.AfterFunc(saveDelay, a.persistOnMain)
 	a.mu.Unlock()
+}
+
+// persistOnMain runs persistNow on the UI thread when there is one.
+//
+// Widgets write bound fields directly, so those fields are only safe to
+// read from the UI thread. The timer fires on a background goroutine, so
+// marshalling keeps the snapshot from racing a keystroke. Before the
+// window exists (startup, tests) there is no loop to marshal to.
+func (a *App) persistOnMain() {
+	a.mu.Lock()
+	ready := a.window != nil
+	a.mu.Unlock()
+	if !ready {
+		a.persistNow()
+		return
+	}
+	mygo.RunOnMain(a.persistNow)
+}
+
+// persistIfChanged schedules a save when the in-memory state differs from
+// what was last written. Widgets mutate bound values directly, so the view
+// is the place where those edits become visible to us.
+func (a *App) persistIfChanged() {
+	a.mu.Lock()
+	devices := marshalDevices(a.devices)
+	settings := marshalSettings(a.settings)
+	changed := devices != a.savedDevices || settings != a.savedSettings
+	a.mu.Unlock()
+	if changed {
+		a.persistSoon()
+	}
+}
+
+// persistNow writes devices and settings to disk and records the snapshot.
+func (a *App) persistNow() {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
+	a.mu.Lock()
+	list := deviceValues(a.devices)
+	settings := a.settings
+	a.savedDevices = marshalDevices(a.devices)
+	a.savedSettings = marshalSettings(settings)
+	a.mu.Unlock()
+
 	_ = core.SaveDevices(list)
+	_ = core.SaveSettings(settings)
+}
+
+func marshalDevices(list []*core.Device) string {
+	data, err := json.Marshal(deviceValues(list))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func marshalSettings(s core.Settings) string {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (a *App) addExpose(id string) {
 	a.mu.Lock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			a.devices[i].Exposes = append(a.devices[i].Exposes, "")
-		}
+	if d := a.deviceByIDLocked(id); d != nil {
+		d.Exposes = append(d.Exposes, "")
+		a.draftsLocked(d) // grow the draft list
 	}
 	a.mu.Unlock()
+	a.persistSoon()
 	a.refresh()
 }
 
-func (a *App) removeExpose(i, j int) {
+func (a *App) removeExpose(id string, j int) {
 	a.mu.Lock()
-	if i < len(a.devices) && j < len(a.devices[i].Exposes) {
-		e := a.devices[i].Exposes
-		a.devices[i].Exposes = append(e[:j], e[j+1:]...)
+	if d := a.deviceByIDLocked(id); d != nil && j < len(d.Exposes) {
+		d.Exposes = append(d.Exposes[:j], d.Exposes[j+1:]...)
+		if dr := a.drafts[id]; dr != nil && j < len(dr.exposes) {
+			dr.exposes = append(dr.exposes[:j], dr.exposes[j+1:]...)
+		}
 	}
 	a.mu.Unlock()
-	a.save()
+	a.persistNow()
 	a.refresh()
 }
 
 func (a *App) addForward(id string) {
 	a.mu.Lock()
-	for i := range a.devices {
-		if a.devices[i].ID == id {
-			a.devices[i].Forwards = append(a.devices[i].Forwards, "")
+	if d := a.deviceByIDLocked(id); d != nil {
+		d.Forwards = append(d.Forwards, "")
+		a.draftsLocked(d)
+	}
+	a.mu.Unlock()
+	a.persistSoon()
+	a.refresh()
+}
+
+func (a *App) removeForward(id string, j int) {
+	a.mu.Lock()
+	if d := a.deviceByIDLocked(id); d != nil && j < len(d.Forwards) {
+		d.Forwards = append(d.Forwards[:j], d.Forwards[j+1:]...)
+		if dr := a.drafts[id]; dr != nil && j < len(dr.forwards) {
+			dr.forwards = append(dr.forwards[:j], dr.forwards[j+1:]...)
 		}
 	}
 	a.mu.Unlock()
+	a.persistNow()
 	a.refresh()
 }
 
-func (a *App) removeForward(i, j int) {
-	a.mu.Lock()
-	if i < len(a.devices) && j < len(a.devices[i].Forwards) {
-		f := a.devices[i].Forwards
-		a.devices[i].Forwards = append(f[:j], f[j+1:]...)
-	}
-	a.mu.Unlock()
-	a.save()
-	a.refresh()
-}
-
-// deviceStatus 返回列表里显示的状态文字与颜色。
-func (a *App) deviceStatus(d core.Device) (string, myui.Color) {
+// deviceStatus returns the rail label and colour for a device.
+func (a *App) deviceStatus(d *core.Device) (string, myui.Color) {
 	a.mu.Lock()
 	rt := a.rt[d.ID]
+	var errMsg string
+	var busy, srvOn, cliOn bool
+	if rt != nil {
+		errMsg = rt.errMsg
+		busy = rt.busy
+		srvOn = rt.srv != nil
+		cliOn = rt.cli != nil
+	}
 	a.mu.Unlock()
 
 	idle := myui.Hex(colDim)
@@ -982,17 +1317,17 @@ func (a *App) deviceStatus(d core.Device) (string, myui.Color) {
 		}
 		return T("state.idlePeer"), idle
 	}
-	if rt.errMsg != "" {
+	if errMsg != "" {
 		return T("state.error"), myui.Hex(colDanger)
 	}
-	if rt.busy {
+	if busy {
 		return T("state.connecting"), myui.Hex(colGold)
 	}
-	if rt.srv != nil {
-		return T("state.running"), myui.Hex("#5FBF8F")
+	if srvOn {
+		return T("state.running"), myui.Hex(colGood)
 	}
-	if rt.cli != nil {
-		return T("state.connected"), myui.Hex("#5FBF8F")
+	if cliOn {
+		return T("state.connected"), myui.Hex(colGood)
 	}
 	if d.Role == core.RoleHost {
 		return T("state.idleHost"), idle
@@ -1000,22 +1335,27 @@ func (a *App) deviceStatus(d core.Device) (string, myui.Color) {
 	return T("state.idlePeer"), idle
 }
 
-// startHost 按设备配置开票。
+// ---------------------------------------------------------------- connections
+
+// startHost starts sharing the configured ports.
 func (a *App) startHost(id string) {
 	a.mu.Lock()
-	var dev core.Device
-	for _, d := range a.devices {
-		if d.ID == id {
-			dev = d
-		}
+	d := a.deviceByIDLocked(id)
+	if d == nil {
+		a.mu.Unlock()
+		return
 	}
-	rt := a.rt[id]
-	if rt == nil {
-		rt = &runtime{}
-		a.rt[id] = rt
-	}
+	dev := *d
+	// Copy the slices: the goroutine below reads them while the widgets
+	// may be editing the originals.
+	dev.Exposes = append([]string(nil), d.Exposes...)
+	dev.AllowedClients = append([]string(nil), d.AllowedClients...)
+	rt := a.runtimeLocked(id)
 	rt.errMsg = ""
 	rt.busy = true
+	rt.gen++
+	gen := rt.gen
+	st := a.settings
 	a.mu.Unlock()
 	a.refresh()
 
@@ -1023,19 +1363,27 @@ func (a *App) startHost(id string) {
 	for _, spec := range dev.Exposes {
 		port, target, err := parseExpose(spec)
 		if err != nil {
-			a.finishHost(id, nil, err)
+			a.finishHost(id, gen, nil, err)
 			return
 		}
 		targets[port] = target
 	}
 	if len(targets) == 0 {
-		a.finishHost(id, nil, fmt.Errorf("至少填一个端口"))
+		a.finishHost(id, gen, nil, fmt.Errorf("at least one port is required"))
 		return
 	}
 
-	a.mu.Lock()
-	st := a.settings
-	a.mu.Unlock()
+	if dev.Files {
+		if strings.TrimSpace(dev.FileDir) == "" {
+			a.finishHost(id, gen, nil, fmt.Errorf("choose a directory to share"))
+			return
+		}
+		info, err := os.Stat(dev.FileDir)
+		if err != nil || !info.IsDir() {
+			a.finishHost(id, gen, nil, fmt.Errorf("shared directory is not usable: %s", dev.FileDir))
+			return
+		}
+	}
 
 	opts := core.ServerOptions{
 		DERPMapURL:     st.DERPMapURL,
@@ -1046,28 +1394,47 @@ func (a *App) startHost(id string) {
 		SSH:            dev.SSH,
 		AllowedClients: dev.AllowedClients,
 	}
+	if dev.Files {
+		opts.SSH = true
+		opts.SSHFileDir = dev.FileDir
+	}
 	if dev.Persistent {
 		opts.KeyName = "device-" + id
 	}
 
 	go func() {
 		srv, err := core.StartServer(opts)
-		a.finishHost(id, srv, err)
+		a.finishHost(id, gen, srv, err)
 	}()
 }
 
-func (a *App) finishHost(id string, srv *core.Server, err error) {
-	rt := a.ensureRuntime(id)
+func (a *App) finishHost(id string, gen uint64, srv *core.Server, err error) {
+	var closeSrv *core.Server
+	var addr string
+
 	a.mu.Lock()
-	rt.busy = false
-	if err != nil {
-		rt.errMsg = err.Error()
+	rt := a.rt[id]
+	if rt == nil || rt.gen != gen {
+		// The attempt was stopped or the device removed while starting.
+		closeSrv = srv
 	} else {
-		rt.srv = srv
-		rt.addr = srv.Address()
-		fmt.Fprintf(os.Stderr, "clowder: 设备 %s 地址 %s\n", id, rt.addr)
+		rt.busy = false
+		if err != nil {
+			rt.errMsg = err.Error()
+		} else {
+			rt.srv = srv
+			rt.addr = srv.Address()
+			addr = rt.addr
+		}
 	}
 	a.mu.Unlock()
+
+	if closeSrv != nil {
+		_ = closeSrv.Close()
+	}
+	if addr != "" {
+		fmt.Fprintf(os.Stderr, "clowder: %s is sharing at %s\n", id, addr)
+	}
 	a.refresh()
 }
 
@@ -1076,10 +1443,12 @@ func (a *App) stopHost(id string) {
 	rt := a.rt[id]
 	var srv *core.Server
 	if rt != nil {
+		rt.gen++
 		srv = rt.srv
 		rt.srv = nil
 		rt.addr = ""
 		rt.errMsg = ""
+		rt.busy = false
 	}
 	a.mu.Unlock()
 
@@ -1089,29 +1458,28 @@ func (a *App) stopHost(id string) {
 	a.refresh()
 }
 
-// startPeer 连接对方并建立映射。
+// startPeer connects to the peer and installs the port mappings.
 func (a *App) startPeer(id string) {
 	a.mu.Lock()
-	var dev core.Device
-	for _, d := range a.devices {
-		if d.ID == id {
-			dev = d
-		}
+	d := a.deviceByIDLocked(id)
+	if d == nil {
+		a.mu.Unlock()
+		return
 	}
-	rt := a.rt[id]
-	if rt == nil {
-		rt = &runtime{}
-		a.rt[id] = rt
-	}
+	dev := *d
+	dev.Forwards = append([]string(nil), d.Forwards...)
+	rt := a.runtimeLocked(id)
 	rt.errMsg = ""
-	rt.note = ""
 	rt.busy = true
+	rt.gen++
+	gen := rt.gen
+	st := a.settings
 	a.mu.Unlock()
 	a.refresh()
 
 	addr := strings.TrimSpace(dev.Addr)
 	if addr == "" {
-		a.finishPeer(id, nil, 0, fmt.Errorf("先粘贴对方的地址"))
+		a.finishPeer(id, gen, nil, dev, 0, fmt.Errorf("paste the peer's address first"))
 		return
 	}
 
@@ -1119,76 +1487,114 @@ func (a *App) startPeer(id string) {
 	for _, spec := range dev.Forwards {
 		local, remote, err := parseForward(spec)
 		if err != nil {
-			a.finishPeer(id, nil, 0, err)
+			a.finishPeer(id, gen, nil, dev, 0, err)
 			return
 		}
 		parsed = append(parsed, [2]uint16{local, remote})
 	}
+	if len(parsed) == 0 {
+		a.finishPeer(id, gen, nil, dev, 0, fmt.Errorf("at least one port mapping is required"))
+		return
+	}
 
-	a.mu.Lock()
-	st := a.settings
-	a.mu.Unlock()
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", st.SocksPort)
 
 	go func() {
-		c, err := core.NewClientWithOptions(core.ClientOptions{Addr: addr, DERPMapURL: st.DERPMapURL})
+		c, err := core.NewClientWithOptions(core.ClientOptions{
+			Addr:       addr,
+			DERPMapURL: st.DERPMapURL,
+			// A stable key per peer makes the host's allow-list usable.
+			KeyName: "device-" + id,
+		})
 		if err != nil {
-			a.finishPeer(id, nil, 0, err)
+			a.finishPeer(id, gen, nil, dev, 0, err)
 			return
 		}
+
+		a.mu.Lock()
+		if rt := a.rt[id]; rt != nil && rt.gen == gen {
+			rt.clientKey = c.PublicKey()
+		}
+		a.mu.Unlock()
+		a.refresh()
+
 		lat, err := c.Ping(30 * time.Second)
 		if err != nil {
 			_ = c.Close()
-			a.finishPeer(id, nil, 0, fmt.Errorf("连不上对方：%w", err))
+			a.finishPeer(id, gen, nil, dev, 0,
+				fmt.Errorf("cannot reach the peer: %w", err))
 			return
 		}
+
 		for _, m := range parsed {
 			if _, err := c.Forward(fmt.Sprintf("127.0.0.1:%d", m[0]), m[1]); err != nil {
 				_ = c.Close()
-				a.finishPeer(id, nil, lat, fmt.Errorf("本地端口 %d 被占用：%w", m[0], err))
+				a.finishPeer(id, gen, nil, dev, lat,
+					fmt.Errorf("local port %d is busy: %w", m[0], err))
 				return
 			}
 			if dev.UDP {
 				if _, err := c.ForwardUDP(fmt.Sprintf("127.0.0.1:%d", m[0]), m[1]); err != nil {
 					_ = c.Close()
-					a.finishPeer(id, nil, lat, fmt.Errorf("UDP 端口 %d 被占用：%w", m[0], err))
+					a.finishPeer(id, gen, nil, dev, lat,
+						fmt.Errorf("local UDP port %d is busy: %w", m[0], err))
 					return
 				}
 			}
 		}
 
 		if dev.Term && core.TerminalAvailable() {
-			a.ensureTerm(id, addr)
+			a.ensureTerm(id, gen, c)
 		}
 
 		if dev.Socks {
-			if _, err := c.SOCKS5(fmt.Sprintf("127.0.0.1:%d", st.SocksPort)); err != nil {
+			if _, err := c.SOCKS5(socksAddr); err != nil {
 				_ = c.Close()
-				a.finishPeer(id, nil, lat, fmt.Errorf("SOCKS5 启动失败：%w", err))
+				a.finishPeer(id, gen, nil, dev, lat,
+					fmt.Errorf("start the SOCKS5 proxy: %w", err))
 				return
 			}
 		}
-		a.finishPeer(id, c, lat, nil)
+
+		a.finishPeer(id, gen, c, dev, lat, nil)
 	}()
 }
 
-func (a *App) finishPeer(id string, c *core.Client, lat time.Duration, err error) {
-	rt := a.ensureRuntime(id)
+func (a *App) finishPeer(id string, gen uint64, c *core.Client, dev core.Device,
+	lat time.Duration, err error) {
+
+	var closeClient *core.Client
+	stale := false
+
 	a.mu.Lock()
-	rt.busy = false
-	if err != nil {
-		rt.errMsg = err.Error()
+	rt := a.rt[id]
+	if rt == nil || rt.gen != gen {
+		// Stopped, removed, or superseded while connecting.
+		closeClient = c
+		stale = true
 	} else {
-		rt.cli = c
-		rt.lat = lat
-		rt.note = T("status.mappingReady")
-		for _, d := range a.devices {
-			if d.ID == id && d.Socks {
-				rt.note = T("status.socksOn", "addr", "127.0.0.1:1080")
-			}
+		rt.busy = false
+		if err != nil {
+			rt.errMsg = err.Error()
+		} else {
+			rt.cli = c
+			rt.lat = lat
 		}
-		fmt.Fprintf(os.Stderr, "clowder: 设备 %s 已连接 %v\n", id, lat)
 	}
 	a.mu.Unlock()
+
+	if closeClient != nil {
+		_ = closeClient.Close()
+	}
+	if !stale && err != nil {
+		a.setTerm(id, nil)
+	}
+	if !stale && err == nil {
+		fmt.Fprintf(os.Stderr, "clowder: %s connected in %v\n", id, lat)
+		if dev.BrowseFiles {
+			a.openBrowser(id)
+		}
+	}
 	a.refresh()
 }
 
@@ -1198,27 +1604,39 @@ func (a *App) stopPeer(id string) {
 	a.mu.Lock()
 	rt := a.rt[id]
 	var c *core.Client
+	var files *core.Files
 	if rt != nil {
+		rt.gen++
 		c = rt.cli
+		files = rt.files
 		rt.cli = nil
-		rt.note = ""
+		rt.files = nil
+		rt.browse = browseState{}
 		rt.errMsg = ""
 		rt.lat = 0
+		rt.busy = false
 	}
 	a.mu.Unlock()
 
+	if files != nil {
+		_ = files.Close()
+	}
 	if c != nil {
 		_ = c.Close()
 	}
 	a.refresh()
 }
 
-// qrImage 生成二维码，按设备与地址缓存。
+// qrImage renders (and caches) the QR code for an address.
 func (a *App) qrImage(id, addr string) myui.ImageSource {
-	rt := a.ensureRuntime(id)
-	if rt.qrAddr == addr && rt.qrSrc != nil {
-		return rt.qrSrc
+	a.mu.Lock()
+	if rt := a.rt[id]; rt != nil && rt.qrAddr == addr && rt.qrSrc != nil {
+		src := rt.qrSrc
+		a.mu.Unlock()
+		return src
 	}
+	a.mu.Unlock()
+
 	png, err := qrcode.Encode(addr, qrcode.Medium, 640)
 	if err != nil {
 		return nil
@@ -1227,12 +1645,17 @@ func (a *App) qrImage(id, addr string) myui.ImageSource {
 	if err != nil {
 		return nil
 	}
-	rt.qrAddr = addr
-	rt.qrSrc = src
+
+	a.mu.Lock()
+	if rt := a.rt[id]; rt != nil {
+		rt.qrAddr = addr
+		rt.qrSrc = src
+	}
+	a.mu.Unlock()
 	return src
 }
 
-// debugAutoStart 供无头截图使用。
+// debugAutoStart starts a device for headless screenshots.
 func (a *App) debugAutoStart(what string) {
 	a.mu.Lock()
 	var host, peer string
@@ -1258,19 +1681,23 @@ func (a *App) debugAutoStart(what string) {
 	}
 }
 
-// ---------------------------------------------------------------- 解析
+// ---------------------------------------------------------------- parsing
 
 func parseExpose(spec string) (uint16, string, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
-		return 0, "", fmt.Errorf("有空端口")
+		return 0, "", fmt.Errorf("empty port")
 	}
 	if i := strings.IndexByte(spec, '='); i >= 0 {
 		port, err := parsePort(spec[:i])
 		if err != nil {
 			return 0, "", err
 		}
-		return port, strings.TrimSpace(spec[i+1:]), nil
+		target := strings.TrimSpace(spec[i+1:])
+		if target == "" {
+			return 0, "", fmt.Errorf("missing local address after '='")
+		}
+		return port, target, nil
 	}
 	port, err := parsePort(spec)
 	if err != nil {
@@ -1283,7 +1710,7 @@ func parseForward(spec string) (uint16, uint16, error) {
 	spec = strings.TrimSpace(spec)
 	i := strings.IndexByte(spec, ':')
 	if i < 0 {
-		return 0, 0, fmt.Errorf("映射要写成 本地端口:远端端口")
+		return 0, 0, fmt.Errorf("mapping must be written local:remote")
 	}
 	local, err := parsePort(spec[:i])
 	if err != nil {
@@ -1299,40 +1726,12 @@ func parseForward(spec string) (uint16, uint16, error) {
 func parsePort(s string) (uint16, error) {
 	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 16)
 	if err != nil || n == 0 {
-		return 0, fmt.Errorf("端口无效: %q", s)
+		return 0, fmt.Errorf("invalid port: %q", s)
 	}
 	return uint16(n), nil
 }
 
-// sortDevices 保持插入顺序，仅作为稳定排序的占位。
-func sortDevices(list []core.Device) []core.Device {
-	sort.SliceStable(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
-	return list
-}
-
-// wrapAddr 把长地址按窗口宽度手工折行。
-//
-// 框架的 Text 不会为没有空格的超长 token 折行，会直接溢出面板，
-// 所以这里按等宽字体的平均字宽自己断。
-func (a *App) wrapAddr(addr string) string {
-	winW := 1000
-	if a.window != nil {
-		if w, _ := a.window.ContentSize(); w > 0 {
-			winW = w
-		}
-	}
-	const charW = 6.3 // 10.5px 等宽字体的平均字宽
-	perLine := int(float64(winW-700) / charW)
-	if perLine < 24 {
-		perLine = 24
-	}
-	if perLine > 72 {
-		perLine = 72
-	}
-	return hardWrap(addr, perLine)
-}
-
-// hardWrap 每 n 个字符插入一个换行。
+// hardWrap inserts a newline every n characters.
 func hardWrap(s string, n int) string {
 	if n <= 0 {
 		return s
@@ -1352,39 +1751,39 @@ func hardWrap(s string, n int) string {
 	return b.String()
 }
 
-// settingsPane 应用级设置。
+// settingsPane draws application-wide settings.
 func (a *App) settingsPane(c *myui.Context) {
 	cream := myui.Hex(colCream)
-	dim := myui.Hex(colDim)
 
 	a.mu.Lock()
 	st := a.settings
 	a.mu.Unlock()
 
-	myui.Row(c).Gap(12).Children(func() {
-		myui.Text(c, T("settings.title")).Font(fontUI).FontSize(24).
-			FontWeight(700).TextColor(cream)
-		myui.Row(c).Grow(1)
-		myui.Toolbar(c, func() {
-			if myui.Button(c, T("nav.back")).Clicked() {
-				a.mu.Lock()
-				a.showSettings = false
-				a.mu.Unlock()
-				a.refresh()
-			}
+	// Header.
+	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
+		headerTile(c, "settings", myui.Hex(colGold))
+		myui.Column(c).Gap(4).Grow(1).Children(func() {
+			myui.Text(c, T("settings.title")).Font(fontUI).FontSize(22).
+				FontWeight(700).LetterSpacing(-0.4).TextColor(cream)
 		})
+		if actionButton(c, btnQuiet, "chevron-left", T("nav.back")).Clicked() {
+			a.mu.Lock()
+			a.showSettings = false
+			a.mu.Unlock()
+			a.refresh()
+		}
 	})
 
-	myui.Column(c).Padding(14, 0).Children(func() {
-		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
-	})
-
-	myui.Column(c).Gap(20).Width(520).Padding(22, 0).Children(func() {
-		// 语言
-		myui.Column(c).Gap(8).Children(func() {
-			myui.Text(c, T("settings.language")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-			myui.Toolbar(c, func() {
+	// General.
+	general := panel(c, 0).Padding(6, 0).Gap(1).
+		Dividers(1, myui.Hex(colLine))
+	general.Children(func() {
+		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(12).Children(func() {
+			iconText(c, "globe", T("settings.language"), 16, 12.5, cream).Grow(1)
+			group := myui.Row(c).Gap(2).Padding(2).Radius(8).
+				Background(myui.Hex(colRail)).Border(1, myui.Hex(colLine)).
+				Shrink(0)
+			group.Children(func() {
 				langs := []struct{ label, tag string }{
 					{T("settings.langAuto"), ""},
 					{"English", "en"},
@@ -1392,71 +1791,59 @@ func (a *App) settingsPane(c *myui.Context) {
 				}
 				for _, l := range langs {
 					l := l
-					mark := ""
-					if st.Language == l.tag {
-						mark = "✓ "
-					}
-					if myui.Button(c, mark+l.label).Clicked() {
+					if segmentButton(c, l.label, st.Language == l.tag).Clicked() {
 						a.applyLanguage(l.tag)
 					}
 				}
 			})
 		})
 
-		// 关窗行为
-		myui.Row(c).Gap(10).Children(func() {
-			myui.Switch(c, a.closeToTrayPtr())
-			myui.Text(c, T("settings.closeToTray")).FontSize(12.5).TextColor(cream)
-		})
+		switchRow(c, "tray", T("settings.closeToTray"), a.closeToTrayPtr())
 
-		// SOCKS 端口
-		myui.Column(c).Gap(6).Width(220).Children(func() {
-			myui.Text(c, T("settings.socksPort")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-			if myui.TextInput(c, &a.socksPortIn).Changed() {
+		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
+			iconText(c, "network", T("settings.socksPort"), 16, 12.5, cream).Grow(1)
+			if myui.TextInput(c, &a.socksPortIn).Width(110).Changed() {
 				a.saveNumericSettings()
 			}
 		})
+	})
 
-		// DERP
-		myui.Column(c).Gap(6).Width(460).Children(func() {
-			myui.Text(c, T("settings.derp")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-			if myui.TextInput(c, &a.derpIn).Changed() {
+	// Relay.
+	relay := panel(c, 0).Padding(6, 0).Gap(1).
+		Dividers(1, myui.Hex(colLine))
+	relay.Children(func() {
+		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
+			iconText(c, "globe", T("settings.derp"), 16, 12.5, cream).Grow(1)
+			if myui.TextInput(c, &a.derpIn).Width(330).Changed() {
 				a.saveNumericSettings()
 			}
 		})
-
-		myui.Column(c).Gap(6).Width(220).Children(func() {
-			myui.Text(c, T("settings.derpRegion")).FontSize(11).
-				FontWeight(600).TextColor(dim)
-			if myui.TextInput(c, &a.derpRegionIn).Changed() {
+		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
+			iconText(c, "radio", T("settings.derpRegion"), 16, 12.5, cream).Grow(1)
+			if myui.TextInput(c, &a.derpRegionIn).Width(110).Changed() {
 				a.saveNumericSettings()
 			}
 		})
 	})
 }
 
-// applyLanguage 切换界面语言并记住。
+// applyLanguage switches the interface language and remembers it.
 func (a *App) applyLanguage(tag string) {
 	a.mu.Lock()
 	a.settings.Language = tag
-	st := a.settings
 	a.mu.Unlock()
 
-	_ = core.SaveSettings(st)
+	a.persistNow()
 	mygo.RunOnMain(func() { mygo.App.SetLocale(tag) })
 	a.refresh()
 }
 
-// closeToTrayPtr 返回设置里开关的指针。
+// closeToTrayPtr returns the binding for the close-to-tray switch.
 func (a *App) closeToTrayPtr() *bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	return &a.settings.CloseToTray
 }
 
-// saveNumericSettings 把文本框里的数字与地址写回配置。
+// saveNumericSettings parses the settings fields and writes them back.
 func (a *App) saveNumericSettings() {
 	a.mu.Lock()
 	if n, err := strconv.Atoi(strings.TrimSpace(a.socksPortIn)); err == nil && n > 0 && n < 65536 {
@@ -1466,9 +1853,265 @@ func (a *App) saveNumericSettings() {
 		a.settings.DERPMapRegion = n
 	}
 	a.settings.DERPMapURL = strings.TrimSpace(a.derpIn)
-	st := a.settings
 	a.mu.Unlock()
 
-	_ = core.SaveSettings(st)
+	a.persistNow()
 	a.refresh()
+}
+
+// openBrowser opens an SFTP session to the host and lists the shared root.
+func (a *App) openBrowser(id string) {
+	a.mu.Lock()
+	rt := a.rt[id]
+	if rt == nil || rt.cli == nil {
+		a.mu.Unlock()
+		return
+	}
+	if rt.files != nil {
+		a.mu.Unlock()
+		a.navigateFiles(id, "/")
+		return
+	}
+	cli := rt.cli
+	gen := rt.gen
+	rt.browse = browseState{path: "/", loading: true}
+	a.mu.Unlock()
+	a.refresh()
+
+	go func() {
+		conn, err := cli.Dial(core.SSHPort, 20*time.Second)
+		if err != nil {
+			a.browseFailed(id, gen, err)
+			return
+		}
+		files, err := core.OpenFiles(conn)
+		if err != nil {
+			a.browseFailed(id, gen, err)
+			return
+		}
+
+		a.mu.Lock()
+		rt := a.rt[id]
+		if rt == nil || rt.gen != gen {
+			a.mu.Unlock()
+			_ = files.Close()
+			return
+		}
+		rt.files = files
+		a.mu.Unlock()
+
+		a.navigateFiles(id, "/")
+	}()
+}
+
+// browseFailed records a file browser error on the runtime.
+func (a *App) browseFailed(id string, gen uint64, err error) {
+	msg := err.Error()
+	if strings.Contains(msg, "subsystem") {
+		msg = T("files.notShared") + " (" + msg + ")"
+	}
+
+	a.mu.Lock()
+	if rt := a.rt[id]; rt != nil && rt.gen == gen {
+		rt.browse.loading = false
+		rt.browse.errMsg = msg
+	}
+	a.mu.Unlock()
+	a.refresh()
+}
+
+// navigateFiles lists dir in the open SFTP session.
+func (a *App) navigateFiles(id, dir string) {
+	dir = path.Clean(dir)
+	if !strings.HasPrefix(dir, "/") {
+		dir = "/" + dir
+	}
+
+	a.mu.Lock()
+	rt := a.rt[id]
+	if rt == nil || rt.files == nil {
+		a.mu.Unlock()
+		return
+	}
+	files := rt.files
+	gen := rt.gen
+	rt.browse.seq++
+	seq := rt.browse.seq
+	rt.browse.path = dir
+	rt.browse.loading = true
+	rt.browse.errMsg = ""
+	rt.browse.note = ""
+	a.mu.Unlock()
+	a.refresh()
+
+	go func() {
+		entries, err := files.List(dir)
+
+		a.mu.Lock()
+		if rt := a.rt[id]; rt != nil && rt.gen == gen && rt.browse.seq == seq {
+			rt.browse.loading = false
+			if err != nil {
+				rt.browse.errMsg = err.Error()
+			} else {
+				if total := len(entries); total > maxFileEntries {
+					entries = entries[:maxFileEntries]
+					rt.browse.note = T("files.truncated", "count", total)
+				}
+				rt.browse.entries = entries
+			}
+		}
+		a.mu.Unlock()
+		a.refresh()
+	}()
+}
+
+// downloadFile copies one shared file into ~/Downloads/Clowder/<device>/.
+func (a *App) downloadFile(id, dir, name string) {
+	a.mu.Lock()
+	rt := a.rt[id]
+	if rt == nil || rt.files == nil {
+		a.mu.Unlock()
+		return
+	}
+	files := rt.files
+	gen := rt.gen
+	deviceName := "peer"
+	if d := a.deviceByIDLocked(id); d != nil {
+		deviceName = d.Name
+	}
+	rt.browse.note = T("files.loading")
+	a.mu.Unlock()
+	a.refresh()
+
+	remote := path.Join(dir, name)
+	base := filepath.Base(name)
+	if base == "." || base == ".." || base == "" || base == string(filepath.Separator) {
+		base = "download"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+	safe := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == 0 {
+			return '-'
+		}
+		return r
+	}, deviceName)
+	local := filepath.Join(home, "Downloads", "Clowder", safe, base)
+
+	go func() {
+		err := files.Download(remote, local)
+
+		a.mu.Lock()
+		if rt := a.rt[id]; rt != nil && rt.gen == gen {
+			if err != nil {
+				rt.browse.note = err.Error()
+			} else {
+				rt.browse.note = T("files.saved", "path", local)
+			}
+		}
+		a.mu.Unlock()
+		a.refresh()
+	}()
+}
+
+// filesPanel draws the peer's browser for the host's shared directory.
+func (a *App) filesPanel(c *myui.Context, id string) {
+	cream := myui.Hex(colCream)
+	text2 := myui.Hex(colText2)
+	dim := myui.Hex(colDim)
+	gold := myui.Hex(colGold)
+
+	rt := a.runtimeSnapshot(id)
+	b := rt.browse
+
+	card := panel(c, 0).Padding(16).Gap(10)
+	card.Children(func() {
+		myui.Row(c).AlignItems(myui.Center).Gap(9).Children(func() {
+			iconEl(c, "folder", 15, dim)
+			sectionLabel(c, T("files.title"))
+			myui.Row(c).Grow(1)
+			myui.Text(c, b.path).Font(fontMono).FontSize(10.5).
+				TextColor(text2).SingleLine()
+			if b.path != "/" {
+				if iconButton(c, "chevron-up", dim).Label(T("files.up")).Clicked() {
+					a.navigateFiles(id, path.Dir(b.path))
+				}
+			}
+			if iconButton(c, "refresh", dim).Label(T("files.refresh")).Clicked() {
+				if rt.files != nil {
+					a.navigateFiles(id, b.path)
+				} else {
+					a.openBrowser(id)
+				}
+			}
+		})
+
+		switch {
+		case b.loading:
+			myui.Text(c, T("files.loading")).FontSize(11.5).TextColor(dim)
+		case b.errMsg != "":
+			notice(c, "alert", b.errMsg, myui.Hex(colDanger))
+			myui.Row(c).Children(func() {
+				if actionButton(c, btnQuiet, "refresh", T("files.retry")).Clicked() {
+					a.openBrowser(id)
+				}
+			})
+		case len(b.entries) == 0:
+			myui.Text(c, T("files.empty")).FontSize(11.5).TextColor(dim)
+		default:
+			for _, e := range b.entries {
+				e := e
+				row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
+					Padding(6, 8).Radius(radRow)
+				if row.Hovered() {
+					row.Background(myui.Hex(colHover))
+				}
+				row.Children(func() {
+					name := "file"
+					if e.Dir {
+						name = "folder"
+					}
+					iconEl(c, name, 15, dim)
+					myui.Text(c, e.Name).FontSize(12).TextColor(cream).
+						Grow(1).SingleLine().TruncateStart()
+					if e.Dir {
+						iconEl(c, "chevron-right", 14, dim)
+					} else {
+						myui.Text(c, humanSize(e.Size)).Font(fontMono).
+							FontSize(10.5).FontFeatures("tnum").TextColor(dim)
+						if iconButton(c, "download", dim).
+							Label(T("files.download")).Clicked() {
+							a.downloadFile(id, b.path, e.Name)
+						}
+					}
+				})
+				if e.Dir {
+					row.Cursor(myui.CursorPointer)
+					row.OnClick(func() {
+						a.navigateFiles(id, path.Join(b.path, e.Name))
+					})
+				}
+			}
+		}
+
+		if b.note != "" {
+			myui.Text(c, b.note).FontSize(11).TextColor(gold)
+		}
+	})
+}
+
+// humanSize formats a byte count for the file list.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

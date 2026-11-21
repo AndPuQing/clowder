@@ -1,55 +1,74 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/egoist/mygo"
 	myui "github.com/egoist/mygo/ui"
 
 	"github.com/AndPuQing/clowder/core"
 )
 
-// termSession 是一条交互式终端会话。
+// terminalCols and terminalRows are the initial size of a terminal
+// session. The pane is wider than it is tall, so a high column count
+// keeps long command lines readable.
+const (
+	terminalCols = 80
+	terminalRows = 24
+)
+
+// termSession is one interactive terminal session: an SSH shell over the
+// tunnel, parsed by libghostty into a cell grid.
 type termSession struct {
 	term   *core.Term
 	stream io.ReadWriteCloser
 	resize func(cols, rows int) error
 
-	mu   sync.Mutex
-	snap *core.Snapshot
-	err  string
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	snap    *core.Snapshot
+	err     string
+
+	closeOnce sync.Once
 }
 
-// startTermSession 通过隧道打开 shell，并把输出喂给 libghostty 内核。
-func (a *App) startTermSession(id, addr string, cols, rows int) *termSession {
-	if !core.TerminalAvailable() {
+// startTermSession opens a shell through client and feeds its output to
+// libghostty. It returns nil when the terminal is unavailable or failed to
+// start; the error is recorded on the device runtime so the UI can show it.
+func (a *App) startTermSession(id string, client *core.Client, cols, rows int) *termSession {
+	if !core.TerminalAvailable() || client == nil {
 		return nil
 	}
 
-	ctx := context.Background()
-	stream, resize, err := core.SSHShell(ctx, addr, cols, rows)
+	conn, err := client.Dial(core.SSHPort, 20*time.Second)
 	if err != nil {
-		a.mu.Lock()
-		rt := a.ensureRuntime(id)
-		rt.termErr = "终端启动失败：" + err.Error()
-		a.mu.Unlock()
+		a.setTermError(id, "terminal: "+err.Error())
 		return nil
 	}
 
-	term, err := core.NewTerm(cols, rows)
+	stream, resize, err := core.SSHShellConn(conn, cols, rows)
 	if err != nil {
-		stream.Close()
+		_ = conn.Close()
+		a.setTermError(id, "terminal: "+err.Error())
 		return nil
 	}
 
-	ts := &termSession{term: term, stream: stream, resize: resize}
+	ts := &termSession{stream: stream, resize: resize}
+	// The emulator answers terminal queries (device attributes, cursor
+	// position); those replies travel back to the shell.
+	term, err := core.NewTermWithWriter(cols, rows, ts)
+	if err != nil {
+		_ = stream.Close()
+		a.setTermError(id, "terminal: "+err.Error())
+		return nil
+	}
+	ts.term = term
 
-	// 调试：自动敲一条命令，验证「输入 → 远端 shell → 渲染」整条链路
+	// Debug hook: type a command automatically to verify the whole path
+	// from keystrokes to remote shell to rendered cells.
 	if os.Getenv("CLOWDER_TERM_DEMO") == "1" {
 		go func() {
 			time.Sleep(3 * time.Second)
@@ -57,68 +76,100 @@ func (a *App) startTermSession(id, addr string, cols, rows int) *termSession {
 		}()
 	}
 
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := stream.Read(buf)
-			if n > 0 {
-				_ = ts.term.Feed(buf[:n])
-				if snap, serr := ts.term.Snapshot(); serr == nil {
-					ts.mu.Lock()
-					ts.snap = snap
-					ts.mu.Unlock()
-				}
-				a.refresh()
-			}
-			if err != nil {
-				ts.mu.Lock()
-				ts.err = "连接已结束"
-				ts.mu.Unlock()
-				a.refresh()
-				return
-			}
-		}
-	}()
-
+	go ts.readLoop(a)
 	return ts
 }
 
-// closeTermSession 结束会话。
+// readLoop reads shell output, feeds the emulator and repaints.
+func (t *termSession) readLoop(a *App) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := t.stream.Read(buf)
+		if n > 0 {
+			_ = t.term.Feed(buf[:n])
+			if snap, serr := t.term.Snapshot(); serr == nil {
+				t.mu.Lock()
+				t.snap = snap
+				t.mu.Unlock()
+			}
+			a.refresh()
+		}
+		if err != nil {
+			t.mu.Lock()
+			if err != io.EOF {
+				t.err = "connection closed: " + err.Error()
+			} else {
+				t.err = "connection closed"
+			}
+			t.mu.Unlock()
+			a.refresh()
+			return
+		}
+	}
+}
+
+// setTermError records a terminal error on the device runtime.
+func (a *App) setTermError(id, msg string) {
+	a.mu.Lock()
+	rt := a.runtimeLocked(id)
+	rt.termErr = msg
+	a.mu.Unlock()
+	a.refresh()
+}
+
+// Close ends the session. It is safe to call more than once.
 func (t *termSession) Close() {
 	if t == nil {
 		return
 	}
-	if t.stream != nil {
-		t.stream.Close()
-	}
-	if t.term != nil {
-		t.term.Close()
-	}
+	t.closeOnce.Do(func() {
+		if t.stream != nil {
+			_ = t.stream.Close()
+		}
+		if t.term != nil {
+			t.term.Close()
+		}
+	})
 }
 
-// snapshot 取当前屏幕。
+// snapshot returns the latest rendered screen.
 func (t *termSession) snapshot() *core.Snapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.snap
 }
 
-// send 把按键数据写进会话。
-func (t *termSession) send(s string) {
-	if t.stream == nil {
-		return
-	}
-	_, _ = t.stream.Write([]byte(s))
+// errText returns the session error, if any.
+func (t *termSession) errText() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.err
 }
 
-// termOf 返回该设备的终端会话。
+// Write sends emulator responses (and user input) to the remote shell.
+func (t *termSession) Write(b []byte) (int, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	if t.stream == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return t.stream.Write(b)
+}
+
+// send writes bytes to the remote shell.
+func (t *termSession) send(s string) {
+	_, _ = t.Write([]byte(s))
+}
+
+// termOf returns the terminal session for a device, if one is running.
 func (a *App) termOf(id string) *termSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.terms[id]
 }
 
-// setTerm 记录终端会话。
+// setTerm records the terminal session for a device, closing any previous
+// one. A nil session removes it.
 func (a *App) setTerm(id string, ts *termSession) {
 	a.mu.Lock()
 	if a.terms == nil {
@@ -136,119 +187,297 @@ func (a *App) setTerm(id string, ts *termSession) {
 	}
 }
 
-// terminalPane 画一个终端。
-func (a *App) terminalPane(c *myui.Context, d core.Device) {
-	ts := a.termOf(d.ID)
+// ensureTerm starts a terminal session if the device wants one and none is
+// running yet. gen is the connection attempt this session belongs to; a
+// session that finishes after the attempt was stopped is discarded.
+func (a *App) ensureTerm(id string, gen uint64, client *core.Client) {
+	if a.termOf(id) != nil {
+		return
+	}
+	ts := a.startTermSession(id, client, terminalCols, terminalRows)
 	if ts == nil {
 		return
 	}
 
+	a.mu.Lock()
+	rt := a.rt[id]
+	current := rt != nil && rt.gen == gen
+	a.mu.Unlock()
+	if !current {
+		ts.Close()
+		return
+	}
+
+	a.setTerm(id, ts)
+	a.refresh()
+}
+
+// terminalPane renders the terminal screen as a grid of styled runs.
+func (a *App) terminalPane(c *myui.Context, id string) {
+	ts := a.termOf(id)
+	if ts == nil {
+		return
+	}
+
+	pane := myui.Column(c).FillWidth().Radius(radControl).
+		Background(myui.Hex(termBg)).Border(1, myui.Hex(colLine)).
+		Padding(10).Gap(0)
+	pane.Focusable().HandleInput(func(ev myui.InputEvent) bool {
+		b := terminalInput(ev)
+		if len(b) == 0 {
+			return false
+		}
+		ts.send(string(b))
+		return true
+	})
+
 	snap := ts.snapshot()
 	if snap == nil {
-		myui.Text(c, "…").Font(fontMono).FontSize(12).TextColor(myui.Hex(colDim))
+		pane.Children(func() {
+			myui.Text(c, "…").Font(fontMono).FontSize(12).
+				TextColor(myui.Hex(colDim))
+		})
 		return
 	}
 
 	cols := snap.Cols
 	if cols <= 0 {
-		cols = 80
+		cols = terminalCols
 	}
-	fontSize := float32(12)
+	fontSize := float32(11)
 	if cols > 90 {
 		fontSize = 10.5
 	}
 
-	maxRows := 11
+	maxRows := 12
 	if snap.Rows < maxRows {
 		maxRows = snap.Rows
 	}
 
-	myui.Column(c).Padding(10).Radius(radCard).
-		Background(myui.Hex("#0B1512")).Width(620).Gap(0).Children(func() {
+	pane.Children(func() {
 		for y, row := range snap.Cells {
 			if y >= maxRows {
 				break
 			}
 			y := y
 			line := row
-			_ = y
 			myui.Row(c).Children(func() {
-				// 把同样式的连续单元格合并成一段，减少元素数量
-				i := 0
-				for i < len(line) {
-					start := i
-					style := line[i]
-					for i < len(line) && sameStyle(line[i], style) {
-						i++
-					}
-
-					text := ""
-					for _, cell := range line[start:i] {
-						if cell.Text == "" {
-							text += " "
-						} else {
-							text += cell.Text
-						}
-					}
-
-					fg := style.Fg
-					bg := style.Bg
-					if fg == "" {
-						fg = colCream
-					}
-					if snap.CursorVisible && y == snap.CursorY &&
-						snap.CursorX >= start && snap.CursorX < i {
-						// 光标所在段整段反色；底色为空时给一个兜底色，
-						// 否则 Hex("") 会 panic。
-						if bg == "" {
-							bg = colCream
-							fg = "#0B1512"
-						} else {
-							fg, bg = bg, fg
-						}
-					}
-
-					e := myui.Text(c, text).Font(fontMono).FontSize(fontSize).
-						TextColor(myui.Hex(fg))
-					if bg != "" {
-						e.Background(myui.Hex(bg))
-					}
-					if style.Bold {
-						e.Bold()
-					}
-					if style.Italic {
-						e.Italic()
-					}
-					if style.Under {
-						e.Underline()
-					}
-				}
+				a.terminalRow(c, line, y, snap, fontSize)
 			})
 		}
+		if msg := ts.errText(); msg != "" {
+			myui.Text(c, msg).FontSize(11).TextColor(myui.Hex(colDim)).
+				Padding(4, 0)
+		}
 	})
+}
 
-	if msg := ts.err; msg != "" {
-		myui.Text(c, msg).FontSize(11.5).TextColor(myui.Hex(colDim)).
-			Padding(6, 0)
+// terminalRow draws one row, merging adjacent cells that share a style and
+// giving the cursor cell its own inverted run.
+func (a *App) terminalRow(c *myui.Context, line []core.Cell, y int, snap *core.Snapshot, fontSize float32) {
+	cursorAt := func(i int) bool {
+		return snap.CursorVisible && y == snap.CursorY && i == snap.CursorX
+	}
+
+	i := 0
+	for i < len(line) {
+		if cursorAt(i) {
+			fg, bg := cellColors(line[i], true)
+			a.drawRun(c, []core.Cell{line[i]}, fg, bg, fontSize)
+			i++
+			continue
+		}
+
+		start := i
+		for i < len(line) && sameStyle(line[i], line[start]) && !cursorAt(i) {
+			i++
+		}
+		fg, bg := cellColors(line[start], false)
+		a.drawRun(c, line[start:i], fg, bg, fontSize)
 	}
 }
 
-// sameStyle 判断两格能否合并成同一段文本。
-func sameStyle(a, b core.Cell) bool {
-	return a.Fg == b.Fg && a.Bg == b.Bg && a.Bold == b.Bold &&
-		a.Italic == b.Italic && a.Under == b.Under
-}
-
-// ensureTerm 在需要时创建终端会话。
-func (a *App) ensureTerm(id, addr string) {
-	if a.termOf(id) != nil {
+// drawRun renders a run of cells that share one visual style.
+func (a *App) drawRun(c *myui.Context, cells []core.Cell, fg, bg string, fontSize float32) {
+	if len(cells) == 0 {
 		return
 	}
-	ts := a.startTermSession(id, addr, 86, 24)
-	if ts != nil {
-		a.setTerm(id, ts)
+	var text []rune
+	for _, cell := range cells {
+		if cell.Text == "" {
+			text = append(text, ' ')
+			continue
+		}
+		text = append(text, []rune(cell.Text)...)
+	}
+	if len(text) == 0 {
+		return
+	}
+
+	style := cells[0]
+	// NoWrap and PreserveSpaces keep a screen row from reflowing: a terminal
+	// line is positioned by cell, so wrapping it would move every cell that
+	// follows, and dropping a run's trailing spaces would collapse columns.
+	e := myui.Text(c, string(text)).Font(fontMono).FontSize(fontSize).
+		NoWrap().PreserveSpaces().TextColor(myui.Hex(fg))
+	if bg != "" {
+		e.Background(myui.Hex(bg))
+	}
+	if style.Bold {
+		e.Bold()
+	}
+	if style.Italic {
+		e.Italic()
+	}
+	if style.Under {
+		e.Underline()
 	}
 }
 
-var _ = fmt.Sprintf
-var _ = mygo.RunOnMain
+// cellColors resolves the foreground and background colours for a run,
+// applying inverse video and the cursor block if needed.
+func cellColors(cell core.Cell, cursor bool) (fg, bg string) {
+	fg, bg = cell.Fg, cell.Bg
+	if fg == "" {
+		fg = colCream
+	}
+	if cell.Inverse {
+		// Swap the two inks. An unset background means "the terminal
+		// background", so the inverse block takes the foreground colour.
+		if bg == "" {
+			bg, fg = fg, termBg
+		} else {
+			fg, bg = bg, fg
+		}
+	}
+	if cursor {
+		// The cursor block is the cell's ink, its text the cell's background.
+		text := bg
+		if text == "" {
+			text = termBg
+		}
+		fg, bg = text, fg
+	}
+	return fg, bg
+}
+
+// sameStyle reports whether two cells can be merged into one run.
+func sameStyle(a, b core.Cell) bool {
+	return a.Fg == b.Fg && a.Bg == b.Bg && a.Bold == b.Bold &&
+		a.Italic == b.Italic && a.Under == b.Under && a.Inverse == b.Inverse
+}
+
+// fnKeySeqs are the escape sequences for the function keys.
+var fnKeySeqs = map[myui.Key]string{
+	myui.KeyF1:  "\x1bOP",
+	myui.KeyF2:  "\x1bOQ",
+	myui.KeyF3:  "\x1bOR",
+	myui.KeyF4:  "\x1bOS",
+	myui.KeyF5:  "\x1b[15~",
+	myui.KeyF6:  "\x1b[17~",
+	myui.KeyF7:  "\x1b[18~",
+	myui.KeyF8:  "\x1b[19~",
+	myui.KeyF9:  "\x1b[20~",
+	myui.KeyF10: "\x1b[21~",
+	myui.KeyF11: "\x1b[23~",
+	myui.KeyF12: "\x1b[24~",
+}
+
+// terminalInput turns one UI input event into the bytes a VT expects, or nil
+// when the event is not keyboard input the terminal should take.
+func terminalInput(ev myui.InputEvent) []byte {
+	switch ev.Kind {
+	case myui.InputText:
+		if ev.Text == "" {
+			return nil
+		}
+		return []byte(ev.Text)
+	case myui.InputKeyDown:
+	default:
+		return nil
+	}
+
+	// Control combinations map onto the C0 bytes.
+	if ev.Mods&myui.Ctrl != 0 {
+		if b, ok := controlByte(ev.Key); ok {
+			return []byte{b}
+		}
+	}
+
+	if seq, ok := fnKeySeqs[ev.Key]; ok {
+		return []byte(seq)
+	}
+
+	switch ev.Key {
+	case myui.KeyEnter:
+		return []byte("\r")
+	case myui.KeyBackspace:
+		return []byte{0x7f}
+	case myui.KeyTab:
+		if ev.Mods&myui.Shift != 0 {
+			return []byte("\x1b[Z")
+		}
+		return []byte("\t")
+	case myui.KeyEscape:
+		return []byte{0x1b}
+	case myui.KeyDelete:
+		return []byte("\x1b[3~")
+	case myui.KeyInsert:
+		return []byte("\x1b[2~")
+	case myui.KeyPageUp:
+		return []byte("\x1b[5~")
+	case myui.KeyPageDown:
+		return []byte("\x1b[6~")
+	case myui.KeyHome:
+		return cursorSeq('H', ev.Mods)
+	case myui.KeyEnd:
+		return cursorSeq('F', ev.Mods)
+	case myui.KeyUp:
+		return cursorSeq('A', ev.Mods)
+	case myui.KeyDown:
+		return cursorSeq('B', ev.Mods)
+	case myui.KeyRight:
+		return cursorSeq('C', ev.Mods)
+	case myui.KeyLeft:
+		return cursorSeq('D', ev.Mods)
+	}
+	return nil
+}
+
+// cursorSeq returns a cursor movement sequence, with the modifier
+// parameter xterm expects (2 shift, 3 alt, 4 both).
+func cursorSeq(final byte, mods myui.Modifiers) []byte {
+	m := 0
+	shift := mods&myui.Shift != 0
+	alt := mods&myui.Alt != 0
+	switch {
+	case shift && alt:
+		m = 4
+	case alt:
+		m = 3
+	case shift:
+		m = 2
+	}
+	if m == 0 {
+		return []byte{0x1b, '[', final}
+	}
+	return []byte(fmt.Sprintf("\x1b[1;%d%c", m, final))
+}
+
+// controlByte maps Ctrl+letter and a few Ctrl+punctuation keys onto the
+// corresponding C0 byte.
+func controlByte(k myui.Key) (byte, bool) {
+	switch {
+	case k >= myui.KeyA && k <= myui.KeyZ:
+		return byte(1 + int(k-myui.KeyA)), true
+	case k == myui.KeySpace:
+		return 0, true
+	case k == myui.KeyBracketLeft:
+		return 27, true
+	case k == myui.KeyBackslash:
+		return 28, true
+	case k == myui.KeyBracketRight:
+		return 29, true
+	}
+	return 0, false
+}

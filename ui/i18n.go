@@ -6,12 +6,16 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/i18n"
+
+	// Widget strings built into MyGo need the same locale data.
+	_ "github.com/egoist/mygo/locales/zh-Hans"
 )
 
 //go:embed catalog/*.json
 var catalogFS embed.FS
 
-// 界面语言：跟随系统。MyGo 的 i18n 会按 CLDR 的距离挑最合适的一种。
+// Interface languages. English is the source language; MyGo's i18n picks
+// the closest catalog to the system locale.
 const (
 	langSource = "en"
 	langZh     = "zh-Hans"
@@ -19,8 +23,8 @@ const (
 
 var catalog *i18n.Catalog
 
-// initI18n 读取语言目录，并把应用声明为「写了哪几种语言」。
-// 必须在 Run 之前调用。
+// initI18n loads the message catalogs and declares which languages the
+// application ships. It must run before Run.
 func initI18n() {
 	sub, err := fs.Sub(catalogFS, "catalog")
 	if err == nil {
@@ -29,7 +33,8 @@ func initI18n() {
 	mygo.App.SetLanguages(langSource, langZh)
 }
 
-// T 按当前界面语言取一条文案。args 是 ICU 里 {name} 的取值，成对给出。
+// T returns a message in the current interface language. args are values
+// for ICU placeholders, given as name/value pairs:
 //
 //	T("status.latency", "latency", "12ms")
 func T(key string, kv ...any) string {
@@ -50,9 +55,4 @@ func T(key string, kv ...any) string {
 		args[name] = kv[i+1]
 	}
 	return m.Format(locale, args)
-}
-
-// IsEnglish 报告当前界面是否是英文，个别排版上的差异可以据此微调。
-func IsEnglish() bool {
-	return i18n.Base(i18n.Locale()) == "en"
 }

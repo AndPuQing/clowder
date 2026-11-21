@@ -1,71 +1,117 @@
-# Clowder 界面规范
+# Clowder interface guidelines
 
-先出规范再写界面。这份文件是对照 Anthropic `frontend-design` 与 `claude-web-skills`
-的「AI tells: the refuse list」自查后的结果。
+Write the spec before the interface. This document is the result of
+checking the design against Anthropic's `frontend-design` notes and the
+`claude-web-skills` "AI tells: the refuse list".
 
-## 读法
+## Reading
 
-> 一个把「一串会过期的地址」交给另一个人的工具。安静、可信、有一点手工感。
+> A tool that hands "a string that expires" to another person. Quiet,
+> trustworthy, with a little hand-made quality.
 
-三个刻度（用户定：可以有点艺术感）：
+Three dials (set by the user: a little artistic licence is welcome):
 
-| 刻度 | 值 | 含义 |
+| Dial | Value | Meaning |
 |---|---|---|
-| DESIGN_VARIANCE | 8 | 不对称，允许大留白和非常规比例 |
-| MOTION_INTENSITY | 3 | 只做状态反馈，不做装饰性动画 |
-| VISUAL_DENSITY | 3 | 偏疏，一屏只讲一件事 |
+| DESIGN_VARIANCE | 8 | Asymmetric; generous whitespace and unusual proportions allowed |
+| MOTION_INTENSITY | 3 | State feedback only, no decorative animation |
+| VISUAL_DENSITY | 3 | Sparse: one idea per screen |
 
-## 硬约束
+## Hard constraints
 
-- 单窗口 880×600，中文界面
-- 地址必须可读、可复制；二维码必须可扫（永远是白底）
-- 只用 MyGo 原生控件：色块、圆角、圆、细线、文字、位图
-- 一屏一个记忆点；其余元素退场
+- One window, 1000×680 (minimum 880×600)
+- English is the source language; a Simplified Chinese translation ships with it
+- The address must be readable and copyable; the QR code must scan (always on white)
+- Only MyGo native primitives: colour blocks, rounded corners, circles, hairlines, text, bitmaps
+- One memorable element per screen; everything else steps back
 
-## 明确不用（refuse list）
+## Off limits (the refuse list)
 
-| 不用 | 原因 |
+| Not used | Why |
 |---|---|
-| `A · B · C` 中点串 | 最典型的机器味 |
-| 全大写字距标签（CLOWDER / 连接地址） | 每屏都出现的套路 |
-| 同一圆角+同一阴影的卡片套组 | SaaS 卡片套件 |
-| 霓虹描边、外发光、渐变文字 | 过饱和 |
-| 等宽字体当装饰（端口、标签） | 等宽只用于地址本身，因为那是真数据 |
-| 编号步骤条（01 / 02） | 这不是流程 |
-| 居中英雄区 + 深色网格渐变 | 默认选项 |
+| `A · B · C` middle-dot strings | The most obvious machine tell |
+| All-caps letter-spaced labels (CLOWDER / ADDRESS) | A cliché on every screen |
+| Card sets sharing one radius and one shadow | SaaS card kit |
+| Neon outlines, outer glows, gradient text | Oversaturated |
+| Monospace as decoration (ports, labels) | Monospace only for the address itself, because that is real data |
+| Numbered step bars (01 / 02) | This is not a flow |
+| Centred hero plus dark grid gradient | The default option |
 
-## 三套候选
+## The three candidates
 
-### A. 海报（Poster）
+### A. Poster
 
-排版即视觉。地址被当成正文主体，字号大到接近海报标题；二维码缩到印章大小，退到右下角。
+Typography is the visual. The address becomes the body copy, sized close
+to a poster headline; the QR code shrinks to stamp size and retreats to
+the bottom right.
 
-- 色：墨 `#101113`、纸 `#FAFAF7`、朱 `#C03B25`（不用 Anthropic 那种陶土橙）
-- 字：正文 Noto Sans CJK SC；地址 Noto Sans Mono CJK SC
-- 布局：左对齐大标题（44px）→ 地址三行大字 → 右下角二维码 120px + 朱红细线
-- 原则：胆量全放在字号对比上，四角留白，不加任何装饰
+- Colours: ink `#101113`, paper `#FAFAF7`, vermilion `#C03B25` (not
+  Anthropic's terracotta)
+- Type: body Noto Sans CJK SC; address Noto Sans Mono CJK SC
+- Layout: left-aligned 44px title → three lines of address → 120px QR
+  bottom right with a vermilion hairline
+- Principle: put all the boldness into size contrast, keep the corners
+  empty, add no ornament
 
-### B. 示意图（Diagram）
+### B. Diagram
 
-把隧道画出来：两个节点，一条线，地址挂在线上。
+Draw the tunnel: two nodes, one line, the address hanging on the line.
 
-- 色：底 `#F4F5F3`、墨 `#15181A`、青 `#0F6E63`
-- 布局：横向中线连接左右两个圆点，左"本机"右"对方"，二维码悬在左节点上方，地址沿线下排
-- 原则：几何为主，字为辅；只有一个强调色，只在一处出现
+- Colours: ground `#F4F5F3`, ink `#15181A`, teal `#0F6E63`
+- Layout: a horizontal axis joining two dots, "this machine" on the left
+  and "peer" on the right, the QR code above the left node, the address
+  along the line
+- Principle: geometry first, type second; one accent colour, used once
 
-### C. 票根（Ticket，仅视觉隐喻）
+### C. Ticket (visual metaphor only)
 
-地址是一张可以交给对方的票（只借用形态，文案不用票务词汇）。
+The address is a ticket you can hand over. Only the shape is borrowed;
+the copy never uses ticket-office vocabulary.
 
-- 色：墨绿 `#12221E`、米 `#F2EDE3`、金 `#C9A227`
-- 布局：中央竖票根，上半二维码，虚线撕口，下半地址；右下角一枚"临时"戳
-- 原则：材质和隐喻承担全部气质，不加阴影叠加
+- Colours: deep green `#12221E`, cream `#F2EDE3`, gold `#C9A227`
+- Layout: a vertical ticket in the centre, QR code in the upper half, a
+  dashed tear line, the address below; a small "ephemeral" stamp in the
+  bottom right
+- Principle: material and metaphor carry the character; no stacked shadows
 
-## 验收
+## Acceptance
 
-渲染后对着下面四条自查：
+After rendering, check these four:
 
-1. 眯眼看，第一眼能不能说出主角是什么
-2. 有没有任何元素只是装饰
-3. 换一个产品名，这套界面是否还成立（成立就说明没做出特征）
-4. 有没有踩到 refuse list 里的条目
+1. Squint: can you say what the main subject is at a glance?
+2. Is anything purely decorative?
+3. Would this interface still work under another product name? (If yes,
+   the character is missing.)
+4. Did anything from the refuse list sneak in?
+5. Does anything explain the interface instead of showing it? Remove it:
+   no helper sentences, no instructions, no reassurance.
+
+## Rules
+
+[`docs/UI.md`](UI.md) holds the binding rules the interface is built and
+reviewed against. The most important one:
+
+> The interface does not explain itself.
+
+Labels name things and actions; state is a value; there are no helper
+sentences, no instructions, and no reassurance. Icons are SVG files, never
+emoji or typographic glyphs.
+
+## Current implementation
+
+The shipped interface uses candidate C's palette (deep green, cream,
+gold), now stepped into three neutral surfaces with hairlines and a soft
+shadow instead of one flat plane. The structure is a desktop tool's:
+
+- a 252 px sidebar: a gold mark and wordmark, `Machines` and its rows with
+  a status dot, then the create and settings actions;
+- a detail page that starts with a 44 px icon tile, an editable machine
+  name and a status chip, with the page's primary action on the right;
+- grouped cards for ports, options, mapping, files and the terminal, each
+  with a single raised surface and a hairline between rows;
+- one gold accent for the primary action and status dots; green and red only
+  for state.
+
+All icons live in `ui/icons/` and are drawn with `ui.Icon`, in the colour of
+the text beside them, so they stay sharp at any scale and work on every
+surface.

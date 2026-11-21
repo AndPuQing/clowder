@@ -15,7 +15,7 @@ Clowder asks for none of that. Two machines agree on one address out of band, an
 - **No account, no sign-in, no control plane.** Nothing to register, nobody in the middle deciding who can connect.
 - **No root, no TUN device.** Everything runs in userspace.
 - **The address is the secret.** It carries the public key and the pre-shared key; whoever has it can connect.
-- **Ephemeral by default.** Every session gets a new address; stop the pass and it's dead.
+- **Ephemeral by default.** Every session gets a new address; stop sharing and it's dead.
 
 ## Install
 
@@ -43,20 +43,20 @@ tar -xzf clowder-linux-amd64.tar.gz
 **On the machine with the service** (the host):
 
 1. Pick the machine on the left, and add the ports you want to share, for example `8080` or `8080=127.0.0.1:8080`.
-2. Press **开票** ("open a pass"). Clowder shows a QR code and an address.
+2. Press **Share**. Clowder shows a QR code and an address.
 3. Hand them to the other person — scan the code, or copy the address.
 
 **On the machine that needs it** (the peer):
 
-1. Press **加入** ("join") in the left column to add a peer.
+1. Press **Connect to a peer** in the left column to add a peer.
 2. Paste the address, choose the mapping (`9000:8080` means "make it available on my 9000").
-3. Press **连接** ("connect"), then open `http://127.0.0.1:9000`.
+3. Press **Connect**, then open `http://127.0.0.1:9000`.
 
-![Clowder, joining someone else's pass](docs/images/peer.png)
+![Clowder, connected to a peer](docs/images/peer.png)
 
 ![The switches for a machine](docs/images/options.png)
 
-Manages as many machines as you like — each one keeps its own state and its own tunnel.
+Manages as many machines as you like — each one keeps its own state and its own tunnel. Click a machine's name in the detail pane to rename it; the rail updates as you type.
 
 ## Beyond plain port sharing
 
@@ -68,14 +68,19 @@ Each machine has a few switches under its ports:
 | **Forward UDP too** | Relay UDP on the same port — game servers, DNS, WebRTC signalling |
 | **Let the peer reach my network** | The peer can dial *any* address this machine can reach, not just the ports you listed |
 | **Only these client keys** | Refuse everyone except the client public keys you paste in |
+| **Share files (read-only)** | Expose one directory over SFTP, read-only, for the peer to browse |
 
-On the connecting side there is one more:
+On the connecting side there are two more:
 
 | Switch | What it does |
 |---|---|
+| **Forward UDP too** | Relay UDP as well, on the same local port |
 | **Local SOCKS5 proxy** | Opens `127.0.0.1:1080`; every connection through it is carried by the tunnel to the host, which dials it on your behalf |
+| **Browse the host's files** | Lists the host's shared directory; click a file to download it to `~/Downloads/Clowder/<device>/` |
 
 That last pair is how you reach a machine's whole LAN: the host allows it, the peer points a browser or `curl` at the local SOCKS5 port.
+
+Each peer shows its own public key. Paste that key into the host's **Only these client keys** field to pin the connection: the peer's key is saved per device, so it survives restarts. Entries can be space- or comma-separated, and a `nodekey:` prefix is fine.
 
 ```sh
 curl --socks5-hostname 127.0.0.1:1080 http://192.168.1.20:8080/
@@ -103,13 +108,24 @@ the host: the bytes travel over the tunnel and end up in Ghostty's emulation.
 This needs the library at build time, so released binaries do not include it yet:
 
 ```sh
-# see docs/GHOSTTY.md for building libghostty-vt with Zig 0.17.1
-export PKG_CONFIG_PATH=/path/to/prefix/lib/pkgconfig
-go build -tags libghostty -o clowder ./cmd/clowder
+just ghostty-lib     # build libghostty-vt once (needs Zig 0.17.1)
+just build-ghostty   # the app with the terminal
 ```
 
+The plain Go route is documented in [`docs/GHOSTTY.md`](docs/GHOSTTY.md).
+
 The terminal appears for a peer once **Open interactive terminal** is on and the
-connection is up.
+connection is up. Click it and type: keys, arrows, Ctrl combinations and the
+function keys go straight to the remote shell. The **Send** line below is a
+fallback for pasting a whole command.
+
+![The interactive terminal](docs/images/terminal.png)
+
+### Shared files
+
+Turn on **Allow remote shell (SSH)** and then **Share files (read-only)**, and pick a directory. The peer turns on **Browse the host's files** before connecting: the panel lists the directory, and clicking a file downloads it into `~/Downloads/Clowder/<device>/`. Nothing is mounted and nothing is writable; the SFTP session runs inside the same tunnel as everything else.
+
+![Browsing the host's shared files](docs/images/files.png)
 
 ## Settings
 
@@ -152,6 +168,13 @@ clowderd serve -expose 8080 -allow nodekey:abc123...
 # reach someone else's 8080 on your local 9000, plus a SOCKS5 proxy
 clowderd dial -addr tcXXXX -forward 9000:8080 -udp -socks 127.0.0.1:1080
 
+# share a directory read-only over SFTP
+clowderd serve -expose 8080 -ssh -ssh-files ~/project
+
+# list and download files from a host that shares a directory
+clowderd files -addr tcXXXX -list /
+clowderd files -addr tcXXXX -get /notes.md -out ./notes.md
+
 # keep an address stable across restarts
 clowderd serve -expose 8080 -key my-node
 clowderd keys list
@@ -159,12 +182,30 @@ clowderd keys list
 
 ## Building from source
 
+With [just](https://github.com/casey/just):
+
+```sh
+just                 # build clowder and clowderd into bin/
+just check           # gofmt, go vet, tests
+just e2e             # tunnel a local HTTP file through DERP (needs network)
+just build-ghostty   # the app with the interactive terminal (see docs/GHOSTTY.md)
+just doctor          # check the local toolchain before building
+```
+
+Plain Go works too:
+
 ```sh
 go build -o clowder ./cmd/clowder      # the app
 go build -o clowderd ./cmd/clowderd    # the command line tool
 ```
 
-Linux needs `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` to build (cgo). Releases are built natively on GitHub Actions for each platform — see [`.github/workflows/release.yml`](.github/workflows/release.yml). There is a container setup for Linux GUI work in [`dev/`](dev/).
+This machine keeps its Go toolchain outside `PATH`; `source scripts/env.sh` points at it, and the justfile does the same. On Linux the app loads GTK 3 at runtime (`libgtk-3-0`); WebKitGTK and the Ayatana appindicator are used when present (web view and tray). Releases are built natively on GitHub Actions for each platform — see [`.github/workflows/release.yml`](.github/workflows/release.yml). There is a container setup for Linux GUI work in [`dev/`](dev/).
+
+## Design
+
+The interface is built from a small set of surfaces and one SVG icon set. The
+binding rules — including *the interface does not explain itself* — are in
+[`docs/UI.md`](docs/UI.md).
 
 ## License
 

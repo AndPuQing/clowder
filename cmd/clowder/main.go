@@ -1,4 +1,4 @@
-// Command clowder 是 Clowder 的桌面程序。
+// Command clowder is the desktop application.
 package main
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	version := flag.Bool("version", false, "打印版本号后退出")
+	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
 	if *version {

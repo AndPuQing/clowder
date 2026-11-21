@@ -1,12 +1,12 @@
-# 构建产物
+# Build output
 /bin/
 /dist/
 
-# 设计稿截图（本地验证用）
+# Local screenshots used while checking the design
 .*.png
 
 # Go
 /vendor/
 
-# libghostty 构建产物（本地）
+# Local libghostty build
 /.ghostty-build/

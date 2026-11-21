@@ -1,4 +1,5 @@
 package core
 
-// Version 是 Clowder 的版本号，构建时可用 -ldflags 覆盖。
+// Version is Clowder's version string. Release builds override it with
+// -ldflags "-X github.com/AndPuQing/clowder/core.Version=...".
 var Version = "0.0.0-dev"

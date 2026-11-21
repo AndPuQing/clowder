@@ -8,57 +8,72 @@ import (
 	"time"
 )
 
-// Device 是一台被管理的机器。
+// Device is one managed machine.
 //
-// 两个方向对立看待：
-//   - RoleHost：本机开票，把自己端口暴露出去
-//   - RolePeer：拿着别人的票，把对方的端口映射到本机
+// Two roles read the same record from opposite sides:
+//   - RoleHost shares ports from this machine
+//   - RolePeer connects to someone else's shared address
 type Device struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 
-	// Role 是 "host" 或 "peer"。
+	// Role is RoleHost or RolePeer.
 	Role string `json:"role"`
 
-	// Addr 对 peer 是对方给的地址；对 host 运行后写入自己的地址。
+	// Addr is the peer's address for RolePeer; a host writes its own
+	// address here while sharing.
 	Addr string `json:"addr,omitempty"`
 
-	// Exposes 是 host 要暴露的端口，形如 "8080" / "8080=127.0.0.1:8080"。
+	// Exposes lists the host's ports, as "8080" or "8080=127.0.0.1:8080".
 	Exposes []string `json:"exposes,omitempty"`
 
-	// Forwards 是 peer 的端口映射，形如 "9000:8080"。
+	// Forwards lists the peer's port mappings, as "9000:8080".
 	Forwards []string `json:"forwards,omitempty"`
 
-	// Persistent 为真时 host 使用固定密钥，地址跨重启稳定。
+	// Persistent keeps a saved key for the host, so the address survives
+	// restarts.
 	Persistent bool `json:"persistent,omitempty"`
 
-	// UDP 为真时同时转发 UDP。
+	// UDP also relays UDP on the same port.
 	UDP bool `json:"udp,omitempty"`
 
-	// AllowProxy 为真时允许对方经本机访问其它地址（内网）。
+	// AllowProxy lets the peer reach addresses this machine can reach.
 	AllowProxy bool `json:"allowProxy,omitempty"`
 
-	// SSH 为真时 host 在隧道里开放 SSH（22），对方可执行命令。
+	// SSH opens an SSH service inside the tunnel so the peer can run
+	// commands and, with libghostty, open an interactive terminal.
 	SSH bool `json:"ssh,omitempty"`
 
-	// Term 为真时 peer 连上后打开交互式终端。
+	// Term opens an interactive terminal on the peer after connecting.
 	Term bool `json:"term,omitempty"`
 
-	// Socks 为真时 peer 在本地开一个 SOCKS5 代理。
+	// Files shares FileDir read-only over SFTP (host side). Requires SSH.
+	Files bool `json:"files,omitempty"`
+
+	// FileDir is the directory shared over SFTP.
+	FileDir string `json:"fileDir,omitempty"`
+
+	// BrowseFiles shows the host's shared files on the peer.
+	BrowseFiles bool `json:"browseFiles,omitempty"`
+
+	// Socks starts a local SOCKS5 proxy on the peer.
 	Socks bool `json:"socks,omitempty"`
 
-	// AllowedClients 是 host 允许的客户端公钥，空表示不限制。
+	// AllowedClients limits the host to these client public keys. Empty
+	// means any client holding the address may connect.
 	AllowedClients []string `json:"allowedClients,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 const (
+	// RoleHost shares local ports.
 	RoleHost = "host"
+	// RolePeer connects to a shared address.
 	RolePeer = "peer"
 )
 
-// devicesPath 返回设备清单文件路径。
+// devicesPath returns the device list path, creating its directory.
 func devicesPath() (string, error) {
 	base, err := ConfigDir()
 	if err != nil {
@@ -70,7 +85,7 @@ func devicesPath() (string, error) {
 	return filepath.Join(base, "devices.json"), nil
 }
 
-// LoadDevices 读取设备清单，文件不存在时返回空列表。
+// LoadDevices reads the device list. A missing file yields no devices.
 func LoadDevices() ([]Device, error) {
 	p, err := devicesPath()
 	if err != nil {
@@ -81,16 +96,16 @@ func LoadDevices() ([]Device, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("读取设备清单: %w", err)
+		return nil, fmt.Errorf("read device list: %w", err)
 	}
 	var out []Device
 	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("解析设备清单: %w", err)
+		return nil, fmt.Errorf("parse device list: %w", err)
 	}
 	return out, nil
 }
 
-// SaveDevices 写回设备清单。
+// SaveDevices writes the device list atomically.
 func SaveDevices(list []Device) error {
 	p, err := devicesPath()
 	if err != nil {
@@ -102,12 +117,12 @@ func SaveDevices(list []Device) error {
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("写设备清单: %w", err)
+		return fmt.Errorf("write device list: %w", err)
 	}
 	return os.Rename(tmp, p)
 }
 
-// NewDeviceID 生成一个足够短的设备标识。
+// NewDeviceID returns an ID that is unique enough for a device list.
 func NewDeviceID() string {
 	return fmt.Sprintf("d%d", time.Now().UnixNano())
 }

@@ -15,60 +15,67 @@ import (
 	"tailscale.com/types/key"
 )
 
-// Server 把本机的 TCP 端口通过 tailcat 隧道暴露给拿着地址的人。
+// Server exposes this machine's TCP ports through a tailcat tunnel to
+// whoever holds the address.
 //
-// 默认使用临时密钥：每次启动地址都会变，进程退出即失效。
+// By default it uses an ephemeral key: the address changes on every start
+// and dies when the process exits.
 type Server struct {
 	ts  *tailcat.Server
-	key *SavedKey // 非 nil 表示用了持久化密钥
+	key *SavedKey // non-nil when a persistent key is used
 
 	mu     sync.Mutex
 	closed bool
 }
 
-// ServerOptions 是启动服务端的参数。
+// ServerOptions configures a Server.
 type ServerOptions struct {
-	// Targets 把隧道里的端口映射到本机地址，例如
+	// Targets maps tunnel ports to local addresses, for example
 	//   map[uint16]string{8080: "127.0.0.1:8080"}
-	// 未列出的端口一律拒绝（返回 nil handler，客户端收到 RST）。
+	// Ports that are not listed are refused (the client sees a reset).
 	Targets map[uint16]string
 
-	// Verbose 打开 tailcat 的调试日志。
+	// Verbose enables tailcat's debug logging.
 	Verbose bool
 
-	// KeyName 指定持久化密钥的名字。为空则用临时密钥——
-	// 每次启动地址不同，进程退出即失效。
+	// KeyName selects a persistent key. Empty means an ephemeral key:
+	// every start gets a new address and nothing survives the process.
 	KeyName string
 
-	// UDP 为真时同时转发 UDP（用同样的端口号）。
+	// UDP also forwards UDP on the same port numbers.
 	UDP bool
 
-	// AllowProxy 为真时允许对方经本机访问其它地址（内网 / 任意站点）。
+	// AllowProxy lets the peer reach other addresses through this host
+	// (its LAN, or any address this machine can dial).
 	AllowProxy bool
 
-	// AllowedClients 是允许连接的客户端公钥（nodekey:...），为空则不限制。
+	// AllowedClients limits connections to these client public keys
+	// ("nodekey:..."). Empty accepts any client holding the address.
 	AllowedClients []string
 
-	// DERPMapURL 覆盖默认中继列表地址。
+	// DERPMapURL overrides the default relay map URL.
 	DERPMapURL string
 
-	// RegionID 指定优先使用的中继区域。
+	// RegionID pins a preferred relay region.
 	RegionID int
 
-	// SSH 为真时在隧道里开放 SSH（端口 22），对方可拿到 shell。
+	// SSH opens an SSH service inside the tunnel (port 22), giving the
+	// peer a shell.
 	SSH bool
 
-	// SSHFileDir 非空时开放 SFTP，目录为根，只读。
+	// SSHFileDir, when non-empty, exposes SFTP rooted at this directory,
+	// read-only.
 	SSHFileDir string
 
-	// SSHAuthorizedKeys 是允许登录的 OpenSSH 公钥，空表示只靠隧道身份。
+	// SSHAuthorizedKeys lists OpenSSH public keys allowed to log in.
+	// Empty means the tunnel identity is sufficient.
 	SSHAuthorizedKeys []string
 }
 
-// StartServer 启动服务端并连上 DERP 中继。
+// StartServer starts the server and connects it to a DERP relay.
 func StartServer(opts ServerOptions) (*Server, error) {
 	if len(opts.Targets) == 0 {
-		return nil, fmt.Errorf("至少需要一个要暴露的端口")
+		return nil, fmt.Errorf("at least one port to expose is required")
 	}
 	if opts.Verbose {
 		tailcat.Verbose = true
@@ -80,6 +87,9 @@ func StartServer(opts ServerOptions) (*Server, error) {
 
 	var ts *tailcat.Server
 	ts = &tailcat.Server{
+		// The network stack logs every handshake; keep it quiet unless the
+		// caller asked for diagnostics.
+		Logf: tailcatLogf(opts.Verbose),
 		OnTCP: func(port uint16) func(net.Conn) {
 			if opts.SSH && port == SSHPort {
 				sshOnce.Do(func() {
@@ -96,7 +106,7 @@ func StartServer(opts ServerOptions) (*Server, error) {
 			}
 			target, ok := opts.Targets[port]
 			if !ok {
-				return nil // 未暴露的端口：RST
+				return nil // port not exposed: reset
 			}
 			return func(c net.Conn) {
 				pipeToTarget(c, target)
@@ -124,7 +134,7 @@ func StartServer(opts ServerOptions) (*Server, error) {
 	}
 
 	if opts.AllowProxy {
-		// 对方可以指定任意目标地址，由本机替它拨号
+		// The peer may name any target; this host dials it.
 		ts.AllowProxy = func(netip.AddrPort) bool { return true }
 
 		ts.OnTCPForward = func(ap netip.AddrPort) func(net.Conn) {
@@ -153,13 +163,14 @@ func StartServer(opts ServerOptions) (*Server, error) {
 			if raw == "" {
 				continue
 			}
-			// 用户通常直接粘贴 "nodekey:..."，解析函数要的是裸十六进制
+			// People usually paste "nodekey:..."; the parser wants the
+			// bare hex string.
 			raw = strings.TrimPrefix(raw, "nodekey:")
 			raw = strings.TrimPrefix(raw, "nodekey(")
 			raw = strings.TrimSuffix(raw, ")")
 			pub, err := key.ParseNodePublicUntyped(mem.S(raw))
 			if err != nil {
-				return nil, fmt.Errorf("客户端公钥无效: %s", raw)
+				return nil, fmt.Errorf("invalid client public key: %s", raw)
 			}
 			ts.AllowedClients = append(ts.AllowedClients, pub)
 		}
@@ -176,23 +187,24 @@ func StartServer(opts ServerOptions) (*Server, error) {
 	}
 
 	if err := ts.Start(); err != nil {
-		return nil, fmt.Errorf("启动 tailcat 服务端: %w", err)
+		return nil, fmt.Errorf("start tailcat server: %w", err)
 	}
 	return &Server{ts: ts, key: saved}, nil
 }
 
-// Address 返回可以交给客户端的 tailcat 地址（tc... 开头）。
+// Address returns the address to hand to clients (it starts with tc).
 func (s *Server) Address() string {
 	return string(s.ts.TailcatAddr())
 }
 
-// ListenAddr 返回服务端在隧道里的内部地址，仅用于日志。
+// ListenAddr returns the server's internal address; it is only useful for
+// logs.
 func (s *Server) ListenAddr() string {
 	return s.ts.Addr().String()
 }
 
-// PublicKey 返回服务端的节点公钥。
-// 使用临时密钥时返回空字符串（公钥只存在于本次进程内）。
+// PublicKey returns the server's node public key. With an ephemeral key
+// there is no persistent identity, so the result is empty.
 func (s *Server) PublicKey() string {
 	if s.key != nil {
 		return s.key.PublicKey()
@@ -200,12 +212,12 @@ func (s *Server) PublicKey() string {
 	return ""
 }
 
-// UsingSavedKey 报告是否用了持久化密钥。
+// UsingSavedKey reports whether a persistent key is in use.
 func (s *Server) UsingSavedKey() bool {
 	return s.key != nil
 }
 
-// Close 关闭服务端，地址随即失效。
+// Close shuts the server down; the address stops working immediately.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,7 +228,8 @@ func (s *Server) Close() error {
 	return s.ts.Close()
 }
 
-// pipeToTarget 把隧道来的一条连接接到本机 target 上，双向搬运字节。
+// pipeToTarget connects an incoming tunnel connection to a local target
+// and copies bytes both ways.
 func pipeToTarget(c net.Conn, target string) {
 	defer c.Close()
 
@@ -229,7 +242,7 @@ func pipeToTarget(c net.Conn, target string) {
 	pipe(c, up)
 }
 
-// pipe 双向复制，任一侧结束后两边都关掉。
+// pipe copies in both directions and closes both sides when either ends.
 func pipe(a, b net.Conn) {
 	var once sync.Once
 	closeBoth := func() {
@@ -248,7 +261,7 @@ func pipe(a, b net.Conn) {
 	<-done
 }
 
-// pipeUDPToTarget 把隧道里的一条 UDP 流转发到本机 UDP 目标。
+// pipeUDPToTarget relays one tunnel UDP flow to a local UDP target.
 func pipeUDPToTarget(conn tailcat.ConnPacketConn, target string) {
 	defer conn.Close()
 
