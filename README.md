@@ -56,7 +56,7 @@ tar -xzf clowder-linux-amd64.tar.gz
 
 Manages as many machines and passes as you like — each one keeps its own state and its own tunnel.
 
-> The interface is currently in Chinese. English strings are a small change, not a rewrite.
+> The interface follows your system language: English and Simplified Chinese are included.
 
 ## It keeps running when you close the window
 

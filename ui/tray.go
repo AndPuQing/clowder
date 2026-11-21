@@ -117,7 +117,7 @@ func (a *App) rebuildTrayMenu() {
 	}
 
 	items := []*mygo.MenuItem{
-		{Label: "显示 Clowder", Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
+		{Label: T("tray.show"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
 		mygo.Separator(),
 	}
 
@@ -132,15 +132,15 @@ func (a *App) rebuildTrayMenu() {
 		sub := []*mygo.MenuItem{}
 		if d.Role == core.RoleHost {
 			if srvOn {
-				sub = append(sub, &mygo.MenuItem{Label: "停止开票", Click: func(*mygo.MenuItem, *mygo.Window) { a.stopHost(d.ID) }})
+				sub = append(sub, &mygo.MenuItem{Label: T("action.stop"), Click: func(*mygo.MenuItem, *mygo.Window) { a.stopHost(d.ID) }})
 			} else if !busy {
-				sub = append(sub, &mygo.MenuItem{Label: "开票", Click: func(*mygo.MenuItem, *mygo.Window) { a.startHost(d.ID) }})
+				sub = append(sub, &mygo.MenuItem{Label: T("action.ticket"), Click: func(*mygo.MenuItem, *mygo.Window) { a.startHost(d.ID) }})
 			}
 		} else {
 			if cliOn {
-				sub = append(sub, &mygo.MenuItem{Label: "断开", Click: func(*mygo.MenuItem, *mygo.Window) { a.stopPeer(d.ID) }})
+				sub = append(sub, &mygo.MenuItem{Label: T("action.disconnect"), Click: func(*mygo.MenuItem, *mygo.Window) { a.stopPeer(d.ID) }})
 			} else if !busy {
-				sub = append(sub, &mygo.MenuItem{Label: "连接", Click: func(*mygo.MenuItem, *mygo.Window) { a.startPeer(d.ID) }})
+				sub = append(sub, &mygo.MenuItem{Label: T("action.connect"), Click: func(*mygo.MenuItem, *mygo.Window) { a.startPeer(d.ID) }})
 			}
 		}
 		if rt != nil && rt.errMsg != "" {
@@ -155,13 +155,13 @@ func (a *App) rebuildTrayMenu() {
 
 	items = append(items,
 		mygo.Separator(),
-		&mygo.MenuItem{Label: "退出 Clowder", Click: func(*mygo.MenuItem, *mygo.Window) { a.quit() }},
+		&mygo.MenuItem{Label: T("tray.quit"), Click: func(*mygo.MenuItem, *mygo.Window) { a.quit() }},
 	)
 
 	menu := mygo.NewMenu(items)
-	tip := fmt.Sprintf("Clowder · %d 台设备", len(devices))
+	tip := T("tray.idle", "count", len(devices))
 	if running > 0 {
-		tip = fmt.Sprintf("Clowder · %d 台在运行", running)
+		tip = T("tray.running", "count", running)
 	}
 
 	mygo.RunOnMain(func() {

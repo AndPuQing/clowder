@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
-	myui "github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/transfer"
+	myui "github.com/egoist/mygo/ui"
 	"github.com/skip2/go-qrcode"
 
 	"github.com/AndPuQing/clowder/core"
@@ -73,8 +73,10 @@ type App struct {
 
 // New 读取设备清单并构造界面状态。
 func New() *App {
+	initI18n()
+
 	a := &App{
-		rt:    map[string]*runtime{},
+		rt: map[string]*runtime{},
 		theme: func() *myui.Theme {
 			t := myui.DarkTheme().WithAccent(myui.Hex(colGold))
 			t.Radius = radControl // 让按钮、输入框、开关统一成同一种圆角
@@ -85,7 +87,7 @@ func New() *App {
 		a.devices = list
 	}
 	if len(a.devices) == 0 {
-		list := []core.Device{newDevice(core.RoleHost, "本机")}
+		list := []core.Device{newDevice(core.RoleHost, T("device.host"))}
 		a.devices = list
 		_ = core.SaveDevices(list)
 	}
@@ -93,7 +95,7 @@ func New() *App {
 		a.sel = a.devices[0].ID
 	}
 	if os.Getenv("CLOWDER_DEMO") == "1" {
-		peer := newDevice(core.RolePeer, "对方 1")
+		peer := newDevice(core.RolePeer, T("device.peer")+" 1")
 		peer.Addr = demoAddr
 		a.devices = append(a.devices, peer)
 	}
@@ -134,7 +136,7 @@ func (a *App) Run() error {
 			MinWidth:      880,
 			MinHeight:     600,
 			TitleBarStyle: mygo.TitleBarHidden,
-			Content: myui.View(a.view),
+			Content:       myui.View(a.view),
 		})
 		a.setupTray()
 		a.window.OnClose(func(e *mygo.CloseEvent) {
@@ -190,7 +192,7 @@ func (a *App) view(c *myui.Context) {
 			dev, ok := findDevice(devices, sel)
 			if !ok {
 				myui.Row(c).Grow(1)
-				myui.Text(c, "左边选一台设备").FontSize(14).TextColor(myui.Hex(colDim))
+				myui.Text(c, T("empty.noSelection")).FontSize(14).TextColor(myui.Hex(colDim))
 				myui.Row(c).Grow(1)
 				return
 			}
@@ -199,7 +201,7 @@ func (a *App) view(c *myui.Context) {
 			} else {
 				a.peerDetail(c, dev)
 			}
-			myui.Text(c, "关掉窗口不影响正在进行的连接").
+			myui.Text(c, T("hint.windowClose")).
 				FontSize(11.5).TextColor(myui.Hex(colDim)).Padding(0, 18, 0, 0)
 			_ = cream
 		})
@@ -263,8 +265,8 @@ func (a *App) rail(c *myui.Context, devices []core.Device, sel string) {
 			}
 			row.OnClick(func() { a.addDevice(role) })
 		}
-		addRow("开票（暴露本机端口）", core.RoleHost)
-		addRow("加入（连接对方）", core.RolePeer)
+		addRow(T("nav.host"), core.RoleHost)
+		addRow(T("nav.join"), core.RolePeer)
 	})
 }
 
@@ -291,17 +293,17 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 		myui.Row(c).Grow(1)
 		if running {
 			myui.Toolbar(c, func() {
-				if myui.Button(c, "停止").Clicked() {
+				if myui.Button(c, T("action.stop")).Clicked() {
 					a.stopHost(d.ID)
 				}
 			})
 		} else if !rt.busy {
-			if myui.PrimaryButton(c, "开票").Width(96).Clicked() {
+			if myui.PrimaryButton(c, T("action.ticket")).Width(96).Clicked() {
 				a.startHost(d.ID)
 			}
 		}
 		myui.Toolbar(c, func() {
-			if myui.Button(c, "删除").Clicked() {
+			if myui.Button(c, T("action.remove")).Clicked() {
 				a.removeDevice(d.ID)
 			}
 		})
@@ -317,46 +319,47 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 				Gap(22).Width(600).Children(func() {
 				myui.Column(c).Padding(10).Background(myui.Hex("#FFFFFF")).
 					Radius(radCard).Children(func() {
-						if src := a.qrImage(d.ID, addr); src != nil {
-							myui.Image(c, src).Size(150, 150)
-						}
-					})
+					if src := a.qrImage(d.ID, addr); src != nil {
+						myui.Image(c, src).Size(150, 150)
+					}
+				})
 
 				myui.Row(c).Width(1).Height(150).Background(myui.Hex(colLine))
 
 				myui.Column(c).Gap(9).Grow(1).Children(func() {
-					myui.Text(c, "单向通行").FontSize(23).FontWeight(700).
+					myui.Text(c, T("ticket.title")).FontSize(23).FontWeight(700).
 						TextColor(cream)
-					myui.Text(c, "把这张票交给对方").FontSize(12).TextColor(dim)
-					myui.Column(c).FillWidth().Padding(0, 0, 12, 0).
-						Children(func() {
-							myui.Text(c, addr).Font(fontMono).FontSize(10.5).
-								FillWidth().TextColor(myui.Hex("#C6D2CE"))
-						})
+					myui.Text(c, T("ticket.hint")).FontSize(12).TextColor(dim)
+					myui.Text(c, a.wrapAddr(addr)).Font(fontMono).FontSize(10.5).
+						TextColor(myui.Hex("#C6D2CE"))
 
-					label := "复制地址"
+					label := T("action.copy")
 					if time.Since(a.copiedTime()) < 2*time.Second {
-						label = "已复制"
+						label = T("action.copied")
 					}
-					if myui.PrimaryButton(c, label).Width(112).Clicked() {
+					copyW := float32(112)
+					if IsEnglish() {
+						copyW = 150
+					}
+					if myui.PrimaryButton(c, label).Width(copyW).Clicked() {
 						_ = mygo.Clipboard.Write(transfer.TextData(addr))
 						a.markCopied()
 					}
-					myui.Text(c, "停止后失效").FontSize(11).TextColor(gold)
+					myui.Text(c, T("ticket.expiry")).FontSize(11).TextColor(gold)
 				})
 			})
 		})
 	} else {
 		myui.Column(c).Gap(6).Padding(0, 20, 0, 0).Children(func() {
-			myui.Text(c, "还没开票").FontSize(20).FontWeight(600).TextColor(cream)
-			myui.Text(c, "填好端口，点右上角「开票」生成地址。").
+			myui.Text(c, T("host.emptyTitle")).FontSize(20).FontWeight(600).TextColor(cream)
+			myui.Text(c, T("host.emptyHint")).
 				FontSize(12.5).TextColor(dim)
 		})
 	}
 
 	// 端口
 	myui.Column(c).Gap(8).FillWidth().Padding(0, 22, 0, 0).Children(func() {
-		myui.Text(c, "暴露的端口").FontSize(11).FontWeight(600).TextColor(dim)
+		myui.Text(c, T("section.ports")).FontSize(11).FontWeight(600).TextColor(dim)
 		for i := range a.devices {
 			if a.devices[i].ID != d.ID {
 				continue
@@ -372,7 +375,7 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 					myui.TextInput(c, &a.devices[i].Exposes[j]).Width(260)
 					if len(a.devices[i].Exposes) > 1 {
 						myui.Toolbar(c, func() {
-							if myui.Button(c, "移除").Clicked() {
+							if myui.Button(c, T("action.removeItem")).Clicked() {
 								a.removeExpose(i, j)
 							}
 						})
@@ -382,14 +385,14 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 		}
 		if !running {
 			myui.Toolbar(c, func() {
-				if myui.Button(c, "添加端口").Clicked() {
+				if myui.Button(c, T("action.addPort")).Clicked() {
 					a.addExpose(d.ID)
 				}
 			})
 			myui.Row(c).Gap(10).Children(func() {
 				myui.Switch(c, a.persistentOf(d.ID))
-				myui.Text(c, "固定地址").FontSize(12).TextColor(cream)
-				myui.Text(c, "关闭则每次开票地址都不同").FontSize(11).
+				myui.Text(c, T("opt.persistent")).FontSize(12).TextColor(cream)
+				myui.Text(c, T("opt.persistentHint")).FontSize(11).
 					TextColor(dim)
 			})
 		}
@@ -400,7 +403,7 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 			Padding(0, 14, 0, 0)
 	}
 	if rt.busy {
-		myui.Text(c, "正在连接中继…").FontSize(12).TextColor(gold).
+		myui.Text(c, T("status.connectingRelay")).FontSize(12).TextColor(gold).
 			Padding(0, 14, 0, 0)
 	}
 }
@@ -428,17 +431,17 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		myui.Row(c).Grow(1)
 		if connected {
 			myui.Toolbar(c, func() {
-				if myui.Button(c, "断开").Clicked() {
+				if myui.Button(c, T("action.disconnect")).Clicked() {
 					a.stopPeer(d.ID)
 				}
 			})
 		} else if !rt.busy {
-			if myui.PrimaryButton(c, "连接").Width(96).Clicked() {
+			if myui.PrimaryButton(c, T("action.connect")).Width(96).Clicked() {
 				a.startPeer(d.ID)
 			}
 		}
 		myui.Toolbar(c, func() {
-			if myui.Button(c, "删除").Clicked() {
+			if myui.Button(c, T("action.remove")).Clicked() {
 				a.removeDevice(d.ID)
 			}
 		})
@@ -449,7 +452,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 	})
 
 	myui.Column(c).Gap(10).FillWidth().Padding(0, 24, 0, 0).Children(func() {
-		myui.Text(c, "对方的票面").FontSize(11).FontWeight(600).TextColor(dim)
+		myui.Text(c, T("section.peerAddr")).FontSize(11).FontWeight(600).TextColor(dim)
 		if connected {
 			myui.Text(c, d.Addr).Font(fontMono).FontSize(10.5).
 				FillWidth().TextColor(myui.Hex("#C6D2CE"))
@@ -459,7 +462,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 	})
 
 	myui.Column(c).Gap(8).FillWidth().Padding(0, 22, 0, 0).Children(func() {
-		myui.Text(c, "端口映射").FontSize(11).FontWeight(600).TextColor(dim)
+		myui.Text(c, T("section.mapping")).FontSize(11).FontWeight(600).TextColor(dim)
 		for i := range a.devices {
 			if a.devices[i].ID != d.ID {
 				continue
@@ -475,7 +478,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 					myui.TextInput(c, &a.devices[i].Forwards[j]).Width(260)
 					if len(a.devices[i].Forwards) > 1 {
 						myui.Toolbar(c, func() {
-							if myui.Button(c, "移除").Clicked() {
+							if myui.Button(c, T("action.removeItem")).Clicked() {
 								a.removeForward(i, j)
 							}
 						})
@@ -485,7 +488,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		}
 		if !connected {
 			myui.Toolbar(c, func() {
-				if myui.Button(c, "添加映射").Clicked() {
+				if myui.Button(c, T("action.addMapping")).Clicked() {
 					a.addForward(d.ID)
 				}
 			})
@@ -568,9 +571,9 @@ func (a *App) addressOf(id string) *string {
 }
 
 func (a *App) addDevice(role string) {
-	name := "本机"
+	name := T("device.host")
 	if role == core.RolePeer {
-		name = "对方"
+		name = T("device.peer")
 	}
 	d := newDevice(role, fmt.Sprintf("%s %d", name, len(a.devices)+1))
 
@@ -667,26 +670,26 @@ func (a *App) deviceStatus(d core.Device) (string, myui.Color) {
 	idle := myui.Hex(colDim)
 	if rt == nil {
 		if d.Role == core.RoleHost {
-			return "未开票", idle
+			return T("state.idleHost"), idle
 		}
-		return "未连接", idle
+		return T("state.idlePeer"), idle
 	}
 	if rt.errMsg != "" {
-		return "出错", myui.Hex(colDanger)
+		return T("state.error"), myui.Hex(colDanger)
 	}
 	if rt.busy {
-		return "连接中…", myui.Hex(colGold)
+		return T("state.connecting"), myui.Hex(colGold)
 	}
 	if rt.srv != nil {
-		return "已开票", myui.Hex("#5FBF8F")
+		return T("state.running"), myui.Hex("#5FBF8F")
 	}
 	if rt.cli != nil {
-		return "已连接", myui.Hex("#5FBF8F")
+		return T("state.connected"), myui.Hex("#5FBF8F")
 	}
 	if d.Role == core.RoleHost {
-		return "未开票", idle
+		return T("state.idleHost"), idle
 	}
-	return "未连接", idle
+	return T("state.idlePeer"), idle
 }
 
 // startHost 按设备配置开票。
@@ -834,7 +837,7 @@ func (a *App) finishPeer(id string, c *core.Client, lat time.Duration, err error
 	} else {
 		rt.cli = c
 		rt.lat = lat
-		rt.note = "已建立映射，访问本地端口即可"
+		rt.note = T("status.mappingReady")
 		fmt.Fprintf(os.Stderr, "clowder: 设备 %s 已连接 %v\n", id, lat)
 	}
 	a.mu.Unlock()
@@ -955,4 +958,46 @@ func parsePort(s string) (uint16, error) {
 func sortDevices(list []core.Device) []core.Device {
 	sort.SliceStable(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
 	return list
+}
+
+// wrapAddr 把长地址按窗口宽度手工折行。
+//
+// 框架的 Text 不会为没有空格的超长 token 折行，会直接溢出面板，
+// 所以这里按等宽字体的平均字宽自己断。
+func (a *App) wrapAddr(addr string) string {
+	winW := 1000
+	if a.window != nil {
+		if w, _ := a.window.ContentSize(); w > 0 {
+			winW = w
+		}
+	}
+	const charW = 6.3 // 10.5px 等宽字体的平均字宽
+	perLine := int(float64(winW-640) / charW)
+	if perLine < 24 {
+		perLine = 24
+	}
+	if perLine > 72 {
+		perLine = 72
+	}
+	return hardWrap(addr, perLine)
+}
+
+// hardWrap 每 n 个字符插入一个换行。
+func hardWrap(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
+	r := []rune(s)
+	var b strings.Builder
+	for i := 0; i < len(r); i += n {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		end := i + n
+		if end > len(r) {
+			end = len(r)
+		}
+		b.WriteString(string(r[i:end]))
+	}
+	return b.String()
 }

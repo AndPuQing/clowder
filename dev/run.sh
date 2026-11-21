@@ -39,6 +39,8 @@ if [ "${1:-}" = "gui" ]; then
     -e CLOWDER_MOCKUP \
     -e CLOWDER_TAB \
     -e CLOWDER_DEMO \
+    -e LANG \
+    -e LC_ALL \
     "$IMAGE" bash -c "
       Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
       sleep 2
