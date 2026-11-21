@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -15,8 +16,11 @@ import (
 type Client struct {
 	tc *tailcat.Client
 
-	mu        sync.Mutex
-	listeners []net.Listener
+	mu         sync.Mutex
+	listeners  []net.Listener
+	udpConns   []net.PacketConn
+	socksAddrs []string
+	cancels    []context.CancelFunc
 }
 
 // ClientOptions 是创建客户端的参数。
@@ -129,6 +133,88 @@ func (c *Client) handle(local net.Conn, remotePort uint16) {
 	pipe(local, remote)
 }
 
+// ForwardUDP 在本机 listenAddr 上监听 UDP，把每个来源的报文转进隧道到 remotePort。
+func (c *Client) ForwardUDP(listenAddr string, remotePort uint16) (net.PacketConn, error) {
+	pc, err := net.ListenPacket("udp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("监听 UDP %s: %w", listenAddr, err)
+	}
+
+	c.mu.Lock()
+	c.udpConns = append(c.udpConns, pc)
+	c.mu.Unlock()
+
+	go func() {
+		buf := make([]byte, 64*1024)
+		for {
+			n, src, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			go c.udpFlow(pc, src, append([]byte(nil), buf[:n]...), remotePort)
+		}
+	}()
+
+	return pc, nil
+}
+
+// udpFlow 为一个来源开一条隧道 UDP 连接，收到回包再写回该来源。
+//
+// 注意：这里不能拿到连接就返回——context 一旦取消，连接会被关掉，
+// 所以读循环留在本函数里跑，直到流结束。
+func (c *Client) udpFlow(pc net.PacketConn, src net.Addr, first []byte, remotePort uint16) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn, err := c.tc.DialUDPPort(ctx, remotePort)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write(first); err != nil {
+		return
+	}
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		if _, err := pc.WriteTo(buf[:n], src); err != nil {
+			return
+		}
+	}
+}
+
+// SOCKS5 在本地起一个 SOCKS5 代理，所有连接经隧道送到对方网络。
+func (c *Client) SOCKS5(listenAddr string) (net.Listener, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	c.mu.Lock()
+	c.cancels = append(c.cancels, cancel)
+	c.mu.Unlock()
+
+	ln, err := ServeSOCKS5(ctx, listenAddr, func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ap, err := netip.ParseAddrPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return c.tc.DialTCP(ctx, ap)
+	})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.socksAddrs = append(c.socksAddrs, ln.Addr().String())
+	c.mu.Unlock()
+
+	return ln, nil
+}
+
 // Close 关掉所有本地监听和隧道。
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -138,6 +224,19 @@ func (c *Client) Close() error {
 
 	for _, ln := range lns {
 		ln.Close()
+	}
+	c.mu.Lock()
+	udps := c.udpConns
+	cancels := c.cancels
+	c.udpConns = nil
+	c.cancels = nil
+	c.mu.Unlock()
+
+	for _, pc := range udps {
+		pc.Close()
+	}
+	for _, cancel := range cancels {
+		cancel()
 	}
 	return c.tc.Close()
 }

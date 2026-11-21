@@ -32,6 +32,18 @@ type Device struct {
 	// Persistent 为真时 host 使用固定密钥，地址跨重启稳定。
 	Persistent bool `json:"persistent,omitempty"`
 
+	// UDP 为真时同时转发 UDP。
+	UDP bool `json:"udp,omitempty"`
+
+	// AllowProxy 为真时允许对方经本机访问其它地址（内网）。
+	AllowProxy bool `json:"allowProxy,omitempty"`
+
+	// Socks 为真时 peer 在本地开一个 SOCKS5 代理。
+	Socks bool `json:"socks,omitempty"`
+
+	// AllowedClients 是 host 允许的客户端公钥，空表示不限制。
+	AllowedClients []string `json:"allowedClients,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 }
 

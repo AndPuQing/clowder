@@ -54,7 +54,35 @@ tar -xzf clowder-linux-amd64.tar.gz
 
 ![Clowder, joining someone else's pass](docs/images/peer.png)
 
-Manages as many machines and passes as you like — each one keeps its own state and its own tunnel.
+![The switches for a machine](docs/images/options.png)
+
+Manages as many machines as you like — each one keeps its own state and its own tunnel.
+
+## Beyond plain port sharing
+
+Each machine has a few switches under its ports:
+
+| Switch | What it does |
+|---|---|
+| **Stable address** | Keep the same address across restarts (saved key instead of an ephemeral one) |
+| **Forward UDP too** | Relay UDP on the same port — game servers, DNS, WebRTC signalling |
+| **Let the peer reach my network** | The peer can dial *any* address this machine can reach, not just the ports you listed |
+| **Only these client keys** | Refuse everyone except the client public keys you paste in |
+
+On the connecting side there is one more:
+
+| Switch | What it does |
+|---|---|
+| **Local SOCKS5 proxy** | Opens `127.0.0.1:1080`; every connection through it is carried by the tunnel to the host, which dials it on your behalf |
+
+That last pair is how you reach a machine's whole LAN: the host allows it, the peer points a browser or `curl` at the local SOCKS5 port.
+
+```sh
+curl --socks5-hostname 127.0.0.1:1080 http://192.168.1.20:8080/
+curl --socks5-hostname 127.0.0.1:1080 https://internal.example/
+```
+
+The tunnel carries the bytes; the host does the routing.
 
 > The interface follows your system language: English and Simplified Chinese are included.
 
@@ -78,8 +106,14 @@ The same engine ships as `clowderd`, for headless machines and scripts:
 # share this machine's 8080
 clowderd serve -expose 8080
 
-# reach someone else's 8080 on your local 9000
-clowderd dial -addr tcXXXX -forward 9000:8080
+# share TCP and UDP, let the peer reach the whole network
+clowderd serve -expose 8080 -udp -allow-proxy
+
+# only these clients may connect
+clowderd serve -expose 8080 -allow nodekey:abc123...
+
+# reach someone else's 8080 on your local 9000, plus a SOCKS5 proxy
+clowderd dial -addr tcXXXX -forward 9000:8080 -udp -socks 127.0.0.1:1080
 
 # keep an address stable across restarts
 clowderd serve -expose 8080 -key my-node

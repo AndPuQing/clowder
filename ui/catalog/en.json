@@ -38,5 +38,10 @@
   "tray.show": "Show Clowder",
   "tray.quit": "Quit Clowder",
   "tray.idle": "Clowder · {count} machines",
-  "tray.running": "Clowder · {count} running"
+  "tray.running": "Clowder · {count} running",
+  "opt.udp": "Forward UDP too",
+  "opt.allowProxy": "Let the peer reach my network",
+  "opt.socks": "Local SOCKS5 proxy",
+  "opt.allowedClients": "Only these client keys (optional)",
+  "status.socksOn": "SOCKS5 listening on {addr}"
 }

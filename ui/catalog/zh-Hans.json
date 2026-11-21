@@ -38,5 +38,10 @@
   "tray.show": "显示 Clowder",
   "tray.quit": "退出 Clowder",
   "tray.idle": "Clowder · {count} 台设备",
-  "tray.running": "Clowder · {count} 台在运行"
+  "tray.running": "Clowder · {count} 台在运行",
+  "opt.udp": "同时转发 UDP",
+  "opt.allowProxy": "允许对方访问我的内网",
+  "opt.socks": "本地 SOCKS5 代理",
+  "opt.allowedClients": "只允许这些客户端公钥（可留空）",
+  "status.socksOn": "SOCKS5 已开在 {addr}"
 }

@@ -69,6 +69,8 @@ type App struct {
 
 	tray     *mygo.Tray
 	quitting bool
+
+	allowedDraft map[string]*string
 }
 
 // New 读取设备清单并构造界面状态。
@@ -202,7 +204,7 @@ func (a *App) view(c *myui.Context) {
 				a.peerDetail(c, dev)
 			}
 			myui.Text(c, T("hint.windowClose")).
-				FontSize(11.5).TextColor(myui.Hex(colDim)).Padding(0, 18, 0, 0)
+				FontSize(11.5).TextColor(myui.Hex(colDim)).Padding(18, 0)
 			_ = cream
 		})
 	})
@@ -219,7 +221,7 @@ func (a *App) rail(c *myui.Context, devices []core.Device, sel string) {
 		myui.Text(c, "Clowder").Font(fontUI).FontSize(14).FontWeight(500).
 			TextColor(cream)
 
-		myui.Column(c).Gap(2).Padding(0, 22, 0, 0).Children(func() {
+		myui.Column(c).Gap(2).Padding(22, 0).Children(func() {
 			for _, d := range devices {
 				d := d
 				selected := d.ID == sel
@@ -309,12 +311,12 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 		})
 	})
 
-	myui.Column(c).Padding(0, 14, 0, 14).Children(func() {
+	myui.Column(c).Padding(14, 0).Children(func() {
 		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
 	})
 
 	if running && addr != "" {
-		myui.Row(c).Padding(0, 22, 0, 0).Children(func() {
+		myui.Row(c).Padding(22, 0).Children(func() {
 			myui.Row(c).Padding(24).Background(myui.Hex(colPanel)).Radius(radPanel).
 				Gap(22).Width(600).Children(func() {
 				myui.Column(c).Padding(10).Background(myui.Hex("#FFFFFF")).
@@ -350,7 +352,7 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 			})
 		})
 	} else {
-		myui.Column(c).Gap(6).Padding(0, 20, 0, 0).Children(func() {
+		myui.Column(c).Gap(6).Padding(20, 0).Children(func() {
 			myui.Text(c, T("host.emptyTitle")).FontSize(20).FontWeight(600).TextColor(cream)
 			myui.Text(c, T("host.emptyHint")).
 				FontSize(12.5).TextColor(dim)
@@ -358,7 +360,7 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 	}
 
 	// 端口
-	myui.Column(c).Gap(8).FillWidth().Padding(0, 22, 0, 0).Children(func() {
+	myui.Column(c).Gap(8).FillWidth().Padding(22, 0).Children(func() {
 		myui.Text(c, T("section.ports")).FontSize(11).FontWeight(600).TextColor(dim)
 		for i := range a.devices {
 			if a.devices[i].ID != d.ID {
@@ -397,6 +399,23 @@ func (a *App) hostDetail(c *myui.Context, d core.Device) {
 			})
 		}
 	})
+
+	if !running {
+		myui.Column(c).Gap(10).FillWidth().Padding(18, 0).Children(func() {
+			myui.Row(c).Gap(10).Children(func() {
+				myui.Switch(c, a.udpOf(d.ID))
+				myui.Text(c, T("opt.udp")).FontSize(12).TextColor(cream)
+			})
+			myui.Row(c).Gap(10).Children(func() {
+				myui.Switch(c, a.proxyOf(d.ID))
+				myui.Text(c, T("opt.allowProxy")).FontSize(12).TextColor(cream)
+			})
+			myui.Column(c).Gap(6).Width(420).Children(func() {
+				myui.Text(c, T("opt.allowedClients")).FontSize(11).TextColor(dim)
+				myui.TextInput(c, a.allowedOf(d.ID))
+			})
+		})
+	}
 
 	if rt.errMsg != "" {
 		myui.Text(c, rt.errMsg).FontSize(12).TextColor(myui.Hex(colDanger)).
@@ -447,11 +466,11 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		})
 	})
 
-	myui.Column(c).Padding(0, 14, 0, 14).Children(func() {
+	myui.Column(c).Padding(14, 0).Children(func() {
 		myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
 	})
 
-	myui.Column(c).Gap(10).FillWidth().Padding(0, 24, 0, 0).Children(func() {
+	myui.Column(c).Gap(10).FillWidth().Padding(24, 0).Children(func() {
 		myui.Text(c, T("section.peerAddr")).FontSize(11).FontWeight(600).TextColor(dim)
 		if connected {
 			myui.Text(c, d.Addr).Font(fontMono).FontSize(10.5).
@@ -461,7 +480,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		}
 	})
 
-	myui.Column(c).Gap(8).FillWidth().Padding(0, 22, 0, 0).Children(func() {
+	myui.Column(c).Gap(8).FillWidth().Padding(22, 0).Children(func() {
 		myui.Text(c, T("section.mapping")).FontSize(11).FontWeight(600).TextColor(dim)
 		for i := range a.devices {
 			if a.devices[i].ID != d.ID {
@@ -494,6 +513,14 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 			})
 		}
 	})
+
+	if !connected {
+		myui.Row(c).Gap(10).Padding(16, 0).Children(func() {
+			myui.Switch(c, a.socksOf(d.ID))
+			myui.Text(c, T("opt.socks")).FontSize(12).TextColor(cream)
+			myui.Text(c, "127.0.0.1:1080").Font(fontMono).FontSize(11).TextColor(dim)
+		})
+	}
 
 	if rt.errMsg != "" {
 		myui.Text(c, rt.errMsg).FontSize(12).TextColor(myui.Hex(colDanger)).
@@ -556,6 +583,77 @@ func (a *App) persistentOf(id string) *bool {
 	}
 	// 兜底：返回一个临时值，避免 panic
 	return new(bool)
+}
+
+// udpOf / proxyOf / socksOf / allowedOf 返回设备选项的指针，供控件直接修改。
+func (a *App) udpOf(id string) *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			return &a.devices[i].UDP
+		}
+	}
+	return new(bool)
+}
+
+func (a *App) proxyOf(id string) *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			return &a.devices[i].AllowProxy
+		}
+	}
+	return new(bool)
+}
+
+func (a *App) socksOf(id string) *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			return &a.devices[i].Socks
+		}
+	}
+	return new(bool)
+}
+
+// allowedOf 把白名单数组折叠成一行文本供编辑。
+func (a *App) allowedOf(id string) *string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			if a.allowedDraft == nil {
+				a.allowedDraft = map[string]*string{}
+			}
+			if v, ok := a.allowedDraft[id]; ok {
+				v := v
+				a.devices[i].AllowedClients = splitKeys(*v)
+				return v
+			}
+			joined := strings.Join(a.devices[i].AllowedClients, " ")
+			a.allowedDraft[id] = &joined
+			return &joined
+		}
+	}
+	v := new(string)
+	return v
+}
+
+// splitKeys 把用户输入拆成公钥列表。
+func splitKeys(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // addressOf 返回设备地址字段的指针，供 TextInput 修改。
@@ -725,7 +823,12 @@ func (a *App) startHost(id string) {
 		return
 	}
 
-	opts := core.ServerOptions{Targets: targets}
+	opts := core.ServerOptions{
+		Targets:        targets,
+		UDP:            dev.UDP,
+		AllowProxy:     dev.AllowProxy,
+		AllowedClients: dev.AllowedClients,
+	}
 	if dev.Persistent {
 		opts.KeyName = "device-" + id
 	}
@@ -823,6 +926,21 @@ func (a *App) startPeer(id string) {
 				a.finishPeer(id, nil, lat, fmt.Errorf("本地端口 %d 被占用：%w", m[0], err))
 				return
 			}
+			if dev.UDP {
+				if _, err := c.ForwardUDP(fmt.Sprintf("127.0.0.1:%d", m[0]), m[1]); err != nil {
+					_ = c.Close()
+					a.finishPeer(id, nil, lat, fmt.Errorf("UDP 端口 %d 被占用：%w", m[0], err))
+					return
+				}
+			}
+		}
+
+		if dev.Socks {
+			if _, err := c.SOCKS5("127.0.0.1:1080"); err != nil {
+				_ = c.Close()
+				a.finishPeer(id, nil, lat, fmt.Errorf("SOCKS5 启动失败：%w", err))
+				return
+			}
 		}
 		a.finishPeer(id, c, lat, nil)
 	}()
@@ -838,6 +956,11 @@ func (a *App) finishPeer(id string, c *core.Client, lat time.Duration, err error
 		rt.cli = c
 		rt.lat = lat
 		rt.note = T("status.mappingReady")
+		for _, d := range a.devices {
+			if d.ID == id && d.Socks {
+				rt.note = T("status.socksOn", "addr", "127.0.0.1:1080")
+			}
+		}
 		fmt.Fprintf(os.Stderr, "clowder: 设备 %s 已连接 %v\n", id, lat)
 	}
 	a.mu.Unlock()

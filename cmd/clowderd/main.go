@@ -75,6 +75,10 @@ func runServe(args []string) {
 	fs.Var(&exposes, "expose", "暴露的端口，可写成 端口=本机地址（可重复）")
 	verbose := fs.Bool("v", false, "打开调试日志")
 	keyName := fs.String("key", "", "持久化密钥名（给定后地址跨重启稳定；留空则用临时密钥）")
+	udp := fs.Bool("udp", false, "同时转发 UDP")
+	allowProxy := fs.Bool("allow-proxy", false, "允许对方经本机访问其它地址（内网）")
+	var allow pairList
+	fs.Var(&allow, "allow", "允许的客户端公钥（可重复）")
 	fs.Parse(args)
 
 	if len(exposes.vals) == 0 {
@@ -93,9 +97,12 @@ func runServe(args []string) {
 	}
 
 	srv, err := core.StartServer(core.ServerOptions{
-		Targets: targets,
-		Verbose: *verbose,
-		KeyName: *keyName,
+		Targets:        targets,
+		Verbose:        *verbose,
+		KeyName:        *keyName,
+		UDP:            *udp,
+		AllowProxy:     *allowProxy,
+		AllowedClients: allow.vals,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
@@ -126,6 +133,8 @@ func runDial(args []string) {
 	fs.Var(&forwards, "forward", "本地端口:远端端口（可重复）")
 	pingOnly := fs.Bool("ping", false, "只测连通性，不做映射")
 	keyName := fs.String("key", "", "持久化密钥名（固定客户端公钥，便于服务端白名单）")
+	udp := fs.Bool("udp", false, "同时转发 UDP")
+	socks := fs.String("socks", "", "在本地起 SOCKS5 代理（如 127.0.0.1:1080）")
 	fs.Parse(args)
 
 	if *addr == "" {
@@ -169,6 +178,23 @@ func runDial(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("已映射 本机 %s → 隧道 %d\n", ln.Addr(), remote)
+
+		if *udp {
+			if _, err := c.ForwardUDP(local, remote); err != nil {
+				fmt.Fprintf(os.Stderr, "UDP 监听失败: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("已映射 UDP 本机 %s → 隧道 %d\n", local, remote)
+		}
+	}
+
+	if *socks != "" {
+		ln, err := c.SOCKS5(*socks)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "SOCKS5 启动失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("SOCKS5 代理已开在 %s\n", ln.Addr())
 	}
 
 	fmt.Println("\n按 Ctrl-C 断开。")
