@@ -58,5 +58,8 @@
   "term.placeholder": "Command to run, e.g. uptime",
   "term.run": "Run",
   "term.hint": "The other side must allow remote shell",
-  "term.empty": "No output yet"
+  "term.empty": "No output yet",
+  "opt.term": "Open interactive terminal",
+  "term.live": "Terminal",
+  "term.send": "Send"
 }

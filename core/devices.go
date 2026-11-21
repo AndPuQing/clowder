@@ -41,6 +41,9 @@ type Device struct {
 	// SSH 为真时 host 在隧道里开放 SSH（22），对方可执行命令。
 	SSH bool `json:"ssh,omitempty"`
 
+	// Term 为真时 peer 连上后打开交互式终端。
+	Term bool `json:"term,omitempty"`
+
 	// Socks 为真时 peer 在本地开一个 SOCKS5 代理。
 	Socks bool `json:"socks,omitempty"`
 

@@ -77,6 +77,8 @@ type App struct {
 
 	allowedDraft map[string]*string
 
+	terms map[string]*termSession
+
 	settings     core.Settings
 	showSettings bool
 	socksPortIn  string
@@ -115,6 +117,13 @@ func New() *App {
 	}
 	if len(a.devices) > 0 {
 		a.sel = a.devices[0].ID
+	}
+	if addr := os.Getenv("CLOWDER_DEMO_ADDR"); addr != "" {
+		peer := newDevice(core.RolePeer, T("device.peer")+" 1")
+		peer.Addr = addr
+		peer.Term = true
+		a.devices = append(a.devices, peer)
+		a.sel = peer.ID
 	}
 	if os.Getenv("CLOWDER_DEMO") == "1" {
 		peer := newDevice(core.RolePeer, T("device.peer")+" 1")
@@ -264,7 +273,7 @@ func (a *App) rail(c *myui.Context, devices []core.Device, sel string) {
 				status, statusColor := a.deviceStatus(d)
 				row := myui.Column(c).Gap(3).Padding(9, 11).Radius(radRow).
 					Children(func() {
-						name := myui.Text(c, d.Name).FontSize(13.5)
+						name := myui.Text(c, d.Name).FontSize(13).Width(178)
 						label := myui.Text(c, status).FontSize(11).TextColor(statusColor)
 						if selected {
 							name.FontWeight(600).TextColor(cream)
@@ -567,7 +576,7 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 		}
 	})
 
-	if connected {
+	if connected && a.termOf(d.ID) == nil {
 		myui.Column(c).Gap(8).FillWidth().Padding(20, 0).Children(func() {
 			myui.Text(c, T("term.title")).FontSize(11).
 				FontWeight(600).TextColor(dim)
@@ -593,6 +602,30 @@ func (a *App) peerDetail(c *myui.Context, d core.Device) {
 				myui.Text(c, rt.termErr).FontSize(11.5).
 					TextColor(myui.Hex(colDanger))
 			}
+		})
+	}
+
+	if !connected && core.TerminalAvailable() {
+		myui.Row(c).Gap(10).Padding(16, 0).Children(func() {
+			myui.Switch(c, a.termPtr(d.ID))
+			myui.Text(c, T("opt.term")).FontSize(12).TextColor(cream)
+			myui.Text(c, T("term.hint")).FontSize(11).TextColor(dim)
+		})
+	}
+
+	if connected && a.termOf(d.ID) != nil {
+		myui.Column(c).Gap(8).FillWidth().Padding(18, 0).Children(func() {
+			myui.Text(c, T("term.live")).FontSize(11).
+				FontWeight(600).TextColor(dim)
+			a.terminalPane(c, d)
+
+			row := myui.Row(c).Gap(10).Children(func() {
+				myui.TextInput(c, a.termCmdOf(d.ID)).Width(420)
+				if myui.PrimaryButton(c, T("term.send")).Width(96).Clicked() {
+					a.sendTermLine(d.ID)
+				}
+			})
+			_ = row
 		})
 	}
 
@@ -634,6 +667,9 @@ func (a *App) runtimeOf(id string) *runtime {
 func (a *App) ensureRuntime(id string) *runtime {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rt == nil {
+		a.rt = map[string]*runtime{}
+	}
 	if a.rt[id] == nil {
 		a.rt[id] = &runtime{}
 	}
@@ -711,6 +747,34 @@ func (a *App) sshOf(id string) *bool {
 		}
 	}
 	return new(bool)
+}
+
+// termPtr 返回设备的「打开交互终端」开关。
+func (a *App) termPtr(id string) *bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.devices {
+		if a.devices[i].ID == id {
+			return &a.devices[i].Term
+		}
+	}
+	return new(bool)
+}
+
+// sendTermLine 把输入框的一行发给远端 shell。
+func (a *App) sendTermLine(id string) {
+	ts := a.termOf(id)
+	rt := a.ensureRuntime(id)
+
+	a.mu.Lock()
+	line := rt.termCmd
+	rt.termCmd = ""
+	a.mu.Unlock()
+
+	if ts != nil && line != "" {
+		ts.send(line + "\r")
+	}
+	a.refresh()
 }
 
 // termCmdOf 返回该设备终端输入框绑定的字符串。
@@ -1092,6 +1156,10 @@ func (a *App) startPeer(id string) {
 			}
 		}
 
+		if dev.Term && core.TerminalAvailable() {
+			a.ensureTerm(id, addr)
+		}
+
 		if dev.Socks {
 			if _, err := c.SOCKS5(fmt.Sprintf("127.0.0.1:%d", st.SocksPort)); err != nil {
 				_ = c.Close()
@@ -1125,6 +1193,8 @@ func (a *App) finishPeer(id string, c *core.Client, lat time.Duration, err error
 }
 
 func (a *App) stopPeer(id string) {
+	a.setTerm(id, nil)
+
 	a.mu.Lock()
 	rt := a.rt[id]
 	var c *core.Client
@@ -1252,7 +1322,7 @@ func (a *App) wrapAddr(addr string) string {
 		}
 	}
 	const charW = 6.3 // 10.5px 等宽字体的平均字宽
-	perLine := int(float64(winW-640) / charW)
+	perLine := int(float64(winW-700) / charW)
 	if perLine < 24 {
 		perLine = 24
 	}

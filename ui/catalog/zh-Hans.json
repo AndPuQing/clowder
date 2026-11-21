@@ -58,5 +58,8 @@
   "term.placeholder": "要执行的命令，例如 uptime",
   "term.run": "执行",
   "term.hint": "对方需要打开「允许远程终端」",
-  "term.empty": "还没有输出"
+  "term.empty": "还没有输出",
+  "opt.term": "打开交互终端",
+  "term.live": "终端",
+  "term.send": "发送"
 }

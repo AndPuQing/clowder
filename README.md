@@ -92,7 +92,24 @@ Turn on **Allow remote shell (SSH)** for a machine. After you connect to it as a
 
 No `sshd` to configure, no port 22 to map, no `ssh` client to install — the session runs over the same encrypted tunnel, and tailcat's built-in SSH server handles the shell. The host's SSH host key is generated on first use under `~/.config/tailcat/ssh`.
 
-This first cut runs one command at a time. A full interactive terminal is the next step.
+### Interactive terminal (build-time option)
+
+The peer can also open a real interactive terminal: the session is parsed by
+[libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's terminal core,
+and drawn cell by cell by the app — colours, bold, italic and the cursor block
+included. There is no PTY on your machine and no terminal emulator to install on
+the host: the bytes travel over the tunnel and end up in Ghostty's emulation.
+
+This needs the library at build time, so released binaries do not include it yet:
+
+```sh
+# see docs/GHOSTTY.md for building libghostty-vt with Zig 0.17.1
+export PKG_CONFIG_PATH=/path/to/prefix/lib/pkgconfig
+go build -tags libghostty -o clowder ./cmd/clowder
+```
+
+The terminal appears for a peer once **Open interactive terminal** is on and the
+connection is up.
 
 ## Settings
 
