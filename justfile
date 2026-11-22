@@ -45,13 +45,43 @@ app: _bin
     go build -trimpath -ldflags "{{ldflags}}" -o bin/clowder ./cmd/clowder
 
 # Build only the command-line tool (no GUI dependency; good for servers).
+# Static: CGO off means it runs on a minimal Linux image.
 cli: _bin
-    go build -trimpath -ldflags "{{ldflags}}" -o bin/clowderd ./cmd/clowderd
+    CGO_ENABLED=0 go build -trimpath -ldflags "{{ldflags}}" -o bin/clowderd ./cmd/clowderd
 
 # Build a stripped release build with the version pinned to this commit.
 build-release: _bin
     go build -trimpath -ldflags "{{ldflags}} -s -w" -o bin/clowder ./cmd/clowder
-    go build -trimpath -ldflags "{{ldflags}} -s -w" -o bin/clowderd ./cmd/clowderd
+    CGO_ENABLED=0 go build -trimpath -ldflags "{{ldflags}} -s -w" -o bin/clowderd ./cmd/clowderd
+
+# Build the headless CLI as a static Linux binary for servers. No GTK,
+# WebKitGTK or libc: it runs on a minimal image.
+headless arch="amd64": _bin
+    CGO_ENABLED=0 GOOS=linux GOARCH={{arch}} \
+        go build -trimpath -ldflags "{{ldflags}} -s -w" \
+        -o bin/clowderd-linux-{{arch}} ./cmd/clowderd
+
+# Package the headless CLI with a systemd unit, install notes and checksum.
+package-headless arch="amd64": (headless arch)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p dist
+    d="dist/headless-{{arch}}"
+    rm -rf "$d"
+    mkdir -p "$d"
+    cp "bin/clowderd-linux-{{arch}}" "$d/clowderd"
+    cp packaging/clowderd.service "$d/"
+    cp docs/HEADLESS.md "$d/README.md"
+    cp LICENSE "$d/"
+    tar -czf "dist/clowderd-linux-{{arch}}.tar.gz" -C "$d" .
+    if command -v sha256sum >/dev/null 2>&1; then
+        ( cd dist && sha256sum "clowderd-linux-{{arch}}.tar.gz" \
+            > "clowderd-linux-{{arch}}.sha256" )
+    else
+        ( cd dist && shasum -a 256 "clowderd-linux-{{arch}}.tar.gz" \
+            > "clowderd-linux-{{arch}}.sha256" )
+    fi
+    echo "wrote dist/clowderd-linux-{{arch}}.tar.gz"
 
 # Build the desktop app with the interactive terminal (libghostty).
 # Run `just ghostty-lib` first.

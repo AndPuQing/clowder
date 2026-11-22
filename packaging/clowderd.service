@@ -1,0 +1,26 @@
+[Unit]
+Description=Clowder tunnel daemon
+Documentation=https://github.com/AndPuQing/clowder
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Put the serve arguments here, for example:
+#   CLOWDERD_ARGS=-expose 8080 -key clowderd
+EnvironmentFile=-/etc/clowderd/clowderd.env
+Environment=CLOWDER_CONFIG_DIR=/var/lib/clowder
+ExecStart=/usr/local/bin/clowderd serve $CLOWDERD_ARGS
+Restart=on-failure
+RestartSec=5s
+
+# A dedicated, ephemeral account; keys and settings live in the state dir.
+DynamicUser=yes
+StateDirectory=clowder
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -26,17 +26,32 @@ Download the package for your platform from [Releases](https://github.com/AndPuQ
 | macOS (Apple Silicon) | `clowder-darwin-arm64.zip` | Unzip, drag `Clowder.app` into Applications |
 | macOS (Intel) | `clowder-darwin-amd64.zip` | Same |
 | Windows | `clowder-windows-amd64.zip` | WebView2 runtime (included in Windows 11) |
-| Linux | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` |
+| Linux (GUI) | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` |
+| Linux headless (amd64) | `clowderd-linux-amd64.tar.gz` | — static binary |
+| Linux headless (arm64) | `clowderd-linux-arm64.tar.gz` | — static binary |
 
 The macOS builds are not signed or notarized. The first launch is blocked by Gatekeeper: right-click the app, then choose **Open**.
 
-Linux:
+Linux (desktop):
 
 ```sh
 sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1
 tar -xzf clowder-linux-amd64.tar.gz
 ./clowder
 ```
+
+Linux headless servers use a separate, statically linked CLI package with no
+GTK, WebKitGTK or libc dependency:
+
+```sh
+tar -xzf clowderd-linux-amd64.tar.gz
+sudo install -m 0755 clowderd /usr/local/bin/
+clowderd serve -expose 8080
+```
+
+The archive also contains a systemd unit and install notes; see
+[`docs/HEADLESS.md`](docs/HEADLESS.md). Use `clowderd-linux-arm64.tar.gz` on
+ARM64.
 
 ## Use it
 
@@ -153,7 +168,9 @@ Because the address *is* the credential, treat it like a password for the durati
 
 ## Command line
 
-The same engine ships as `clowderd`, for headless machines and scripts:
+The same engine ships as `clowderd`, for headless machines and scripts. The
+release provides it as a separate static Linux archive
+([`clowderd-linux-*.tar.gz`](docs/HEADLESS.md)):
 
 ```sh
 # share this machine's 8080
@@ -186,6 +203,8 @@ With [just](https://github.com/casey/just):
 
 ```sh
 just                 # build clowder and clowderd into bin/
+just headless        # build the static Linux CLI (amd64; pass arm64 for ARM)
+just package-headless  # make dist/clowderd-linux-amd64.tar.gz
 just check           # gofmt, go vet, tests
 just e2e             # tunnel a local HTTP file through DERP (needs network)
 just build-ghostty   # the app with the interactive terminal (see docs/GHOSTTY.md)

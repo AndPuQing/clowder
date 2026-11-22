@@ -39,14 +39,53 @@ jobs:
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
           go build -trimpath -ldflags "$LDFLAGS" -o out/clowder ./cmd/clowder
-          go build -trimpath -ldflags "$LDFLAGS" -o out/clowderd ./cmd/clowderd
-          tar -czf out/clowder-linux-amd64.tar.gz -C out clowder clowderd
+          tar -czf out/clowder-linux-amd64.tar.gz -C out clowder
           ( cd out && sha256sum clowder-linux-amd64.tar.gz > clowder-linux-amd64.sha256 )
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
           path: out/clowder-linux-amd64.*
+          if-no-files-found: error
+
+  linux-headless:
+    name: linux-headless (amd64 + arm64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+
+      # The CLI imports no cgo packages, so it is a static binary. It needs
+      # no GTK, WebKitGTK or libc and runs on a minimal server image.
+      - name: Build static binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          mkdir -p out
+          LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
+          for arch in amd64 arm64; do
+            d="out/headless-$arch"
+            mkdir -p "$d"
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" \
+              -o "$d/clowderd" ./cmd/clowderd
+            file "$d/clowderd" | grep -q "statically linked"
+            cp packaging/clowderd.service "$d/"
+            cp docs/HEADLESS.md "$d/README.md"
+            cp LICENSE "$d/"
+            tar -czf "out/clowderd-linux-$arch.tar.gz" -C "$d" .
+            ( cd out && sha256sum "clowderd-linux-$arch.tar.gz" \
+                > "clowderd-linux-$arch.sha256" )
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-headless
+          path: |
+            out/clowderd-linux-*.tar.gz
+            out/clowderd-linux-*.sha256
           if-no-files-found: error
 
   macos:
@@ -155,7 +194,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [linux, macos, windows]
+    needs: [linux, linux-headless, macos, windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -180,9 +219,12 @@ jobs:
             | macOS (Apple Silicon) | `clowder-darwin-arm64.zip` | — |
             | macOS (Intel) | `clowder-darwin-amd64.zip` | — |
             | Windows | `clowder-windows-amd64.zip` | WebView2 (included in Windows 11) |
-            | Linux | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` (tray) |
+            | Linux (GUI) | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` (tray) |
+            | Linux headless (amd64) | `clowderd-linux-amd64.tar.gz` | — (static binary) |
+            | Linux headless (arm64) | `clowderd-linux-arm64.tar.gz` | — (static binary) |
 
             On macOS, unzip and drag `Clowder.app` into Applications. If the
             system blocks the first launch, right-click it and choose Open.
-            The command-line build `clowderd` is included. Each archive has a
+            The `clowderd-*` archives contain the static CLI, a systemd unit
+            and install notes; see `README.md` inside. Each archive has a
             `.sha256` checksum file.
