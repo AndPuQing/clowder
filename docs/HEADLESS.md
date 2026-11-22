@@ -1,18 +1,22 @@
 # Clowder headless on Linux
 
 `clowderd` is the same tunnel engine as the desktop app without GTK,
-WebKitGTK or a GUI. The release archive contains one statically linked
-binary: it runs on a minimal image with no libc or desktop packages.
+WebKitGTK or a GUI. The release asset is one statically linked binary, not an
+archive: it runs on a minimal image with no libc or desktop packages.
 
 ## Install
 
 ```sh
-tar -xzf clowderd-linux-amd64.tar.gz
-sudo install -m 0755 clowderd /usr/local/bin/
+base=https://github.com/AndPuQing/clowder/releases/latest/download
+curl -LO "$base/clowderd-linux-amd64"
+curl -LO "$base/clowderd-linux-amd64.sha256"
+sha256sum -c clowderd-linux-amd64.sha256
+chmod +x clowderd-linux-amd64
+sudo install -m 0755 clowderd-linux-amd64 /usr/local/bin/clowderd
 clowderd --version
 ```
 
-Use `clowderd-linux-arm64.tar.gz` on ARM64 servers.
+Use `clowderd-linux-arm64` on ARM64 servers.
 
 ## Use
 
@@ -40,11 +44,12 @@ for every run.
 
 ## systemd
 
-The archive includes `clowderd.service`. It reads its arguments from
+The release also attaches `clowderd.service` (the same file lives in
+[`packaging/`](../packaging/clowderd.service)). It reads its arguments from
 `/etc/clowderd/clowderd.env`:
 
 ```sh
-sudo install -m 0755 clowderd /usr/local/bin/
+sudo install -m 0755 clowderd-linux-amd64 /usr/local/bin/clowderd
 sudo install -m 0644 clowderd.service /etc/systemd/system/
 sudo install -d -m 0755 /etc/clowderd
 printf 'CLOWDERD_ARGS=-expose 8080 -key clowderd\n' \
@@ -67,7 +72,7 @@ clowderd serve -expose 8080 -key clowderd -allow nodekey:...
 
 ## Notes
 
-- The binary is static (`CGO_ENABLED=0`); `file clowderd` reports
+- The binary is static (`CGO_ENABLED=0`); `file clowderd-linux-amd64` reports
   "statically linked" and `ldd` reports "not a dynamic executable".
 - No port has to be opened in the firewall: the tunnel is outbound to a
   DERP relay and becomes peer-to-peer when a direct path exists.

@@ -38,14 +38,15 @@ jobs:
           set -eu
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
-          go build -trimpath -ldflags "$LDFLAGS" -o out/clowder ./cmd/clowder
-          tar -czf out/clowder-linux-amd64.tar.gz -C out clowder
-          ( cd out && sha256sum clowder-linux-amd64.tar.gz > clowder-linux-amd64.sha256 )
+          go build -trimpath -ldflags "$LDFLAGS" -o out/clowder-linux-amd64 ./cmd/clowder
+          ( cd out && sha256sum clowder-linux-amd64 > clowder-linux-amd64.sha256 )
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
-          path: out/clowder-linux-amd64.*
+          path: |
+            out/clowder-linux-amd64
+            out/clowder-linux-amd64.sha256
           if-no-files-found: error
 
   linux-headless:
@@ -67,16 +68,10 @@ jobs:
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
           for arch in amd64 arm64; do
-            d="out/headless-$arch"
-            mkdir -p "$d"
             GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "$LDFLAGS" \
-              -o "$d/clowderd" ./cmd/clowderd
-            file "$d/clowderd" | grep -q "statically linked"
-            cp packaging/clowderd.service "$d/"
-            cp docs/HEADLESS.md "$d/README.md"
-            cp LICENSE "$d/"
-            tar -czf "out/clowderd-linux-$arch.tar.gz" -C "$d" .
-            ( cd out && sha256sum "clowderd-linux-$arch.tar.gz" \
+              -o "out/clowderd-linux-$arch" ./cmd/clowderd
+            file "out/clowderd-linux-$arch" | grep -q "statically linked"
+            ( cd out && sha256sum "clowderd-linux-$arch" \
                 > "clowderd-linux-$arch.sha256" )
           done
 
@@ -84,8 +79,10 @@ jobs:
         with:
           name: linux-headless
           path: |
-            out/clowderd-linux-*.tar.gz
-            out/clowderd-linux-*.sha256
+            out/clowderd-linux-amd64
+            out/clowderd-linux-amd64.sha256
+            out/clowderd-linux-arm64
+            out/clowderd-linux-arm64.sha256
           if-no-files-found: error
 
   macos:
@@ -97,7 +94,9 @@ jobs:
         with:
           go-version: "1.27.x"
 
-      # The runner is Intel; use clang -arch to cross-build arm64, one .app per arch
+      # The runner is Intel; use clang -arch to cross-build arm64. Each arch
+      # gets a DMG with Clowder.app; the CLI is also attached as a raw binary
+      # for scripts.
       - name: Build both arches
         env:
           CGO_ENABLED: "1"
@@ -146,21 +145,32 @@ jobs:
           </plist>
           PLIST
 
-            ( cd "$d" && zip -qry "clowder-darwin-$arch.zip" Clowder.app )
-            mv "$d/clowder-darwin-$arch.zip" out/
-            ( cd out && shasum -a 256 "clowder-darwin-$arch.zip" \
-                > "clowder-darwin-$arch.sha256" )
+            stage="$d/dmg"
+            mkdir -p "$stage"
+            cp -R "$app" "$stage/"
+            ln -s /Applications "$stage/Applications"
+            hdiutil create -volname "Clowder" -srcfolder "$stage" \
+              -ov -format UDZO "out/clowder-darwin-$arch.dmg"
+            ( cd out && shasum -a 256 "clowder-darwin-$arch.dmg" \
+                > "clowder-darwin-$arch.dmg.sha256" )
+
+            cp "$d/clowderd" "out/clowderd-darwin-$arch"
+            ( cd out && shasum -a 256 "clowderd-darwin-$arch" \
+                > "clowderd-darwin-$arch.sha256" )
           done
 
-          ls -lh out/*.zip out/*.sha256
+          ls -lh out/*.dmg out/*.sha256 out/clowderd-darwin-*
 
       - uses: actions/upload-artifact@v4
         with:
           name: darwin
           path: |
-            out/clowder-darwin-amd64.zip
-            out/clowder-darwin-arm64.zip
-            out/clowder-darwin-*.sha256
+            out/clowder-darwin-*.dmg
+            out/clowder-darwin-*.dmg.sha256
+            out/clowderd-darwin-amd64
+            out/clowderd-darwin-amd64.sha256
+            out/clowderd-darwin-arm64
+            out/clowderd-darwin-arm64.sha256
           if-no-files-found: error
 
   windows:
@@ -180,17 +190,19 @@ jobs:
           set -eu
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
-          go build -trimpath -ldflags "$LDFLAGS" -o out/clowder.exe ./cmd/clowder
-          go build -trimpath -ldflags "$LDFLAGS" -o out/clowderd.exe ./cmd/clowderd
-          ( cd out && tar -a -c -f clowder-windows-amd64.zip clowder.exe clowderd.exe )
-          ( cd out && sha256sum clowder-windows-amd64.zip > clowder-windows-amd64.sha256 )
+          go build -trimpath -ldflags "$LDFLAGS" -o out/clowder-windows-amd64.exe ./cmd/clowder
+          go build -trimpath -ldflags "$LDFLAGS" -o out/clowderd-windows-amd64.exe ./cmd/clowderd
+          ( cd out && sha256sum clowder-windows-amd64.exe > clowder-windows-amd64.exe.sha256 )
+          ( cd out && sha256sum clowderd-windows-amd64.exe > clowderd-windows-amd64.exe.sha256 )
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-amd64
           path: |
-            out/clowder-windows-amd64.zip
-            out/clowder-windows-amd64.sha256
+            out/clowder-windows-amd64.exe
+            out/clowder-windows-amd64.exe.sha256
+            out/clowderd-windows-amd64.exe
+            out/clowderd-windows-amd64.exe.sha256
           if-no-files-found: error
 
   release:
@@ -198,6 +210,8 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -209,22 +223,33 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/*
+            packaging/clowderd.service
+            docs/HEADLESS.md
           generate_release_notes: true
           body: |
             Clowder ${{ github.ref_name }}
 
             | Platform | File | Before you run it |
             |---|---|---|
-            | macOS (Apple Silicon) | `clowder-darwin-arm64.zip` | — |
-            | macOS (Intel) | `clowder-darwin-amd64.zip` | — |
-            | Windows | `clowder-windows-amd64.zip` | WebView2 (included in Windows 11) |
-            | Linux (GUI) | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` (tray) |
-            | Linux headless (amd64) | `clowderd-linux-amd64.tar.gz` | — (static binary) |
-            | Linux headless (arm64) | `clowderd-linux-arm64.tar.gz` | — (static binary) |
+            | macOS (Apple Silicon) | `clowder-darwin-arm64.dmg` | Open the DMG, drag `Clowder.app` to Applications |
+            | macOS (Intel) | `clowder-darwin-amd64.dmg` | Same |
+            | macOS CLI (amd64) | `clowderd-darwin-amd64` | `chmod +x`; remove quarantine |
+            | macOS CLI (arm64) | `clowderd-darwin-arm64` | `chmod +x`; remove quarantine |
+            | Windows | `clowder-windows-amd64.exe`, `clowderd-windows-amd64.exe` | WebView2 for the GUI |
+            | Linux (GUI) | `clowder-linux-amd64` | `chmod +x`; GTK, WebKitGTK, appindicator |
+            | Linux headless (amd64) | `clowderd-linux-amd64` | `chmod +x`; static |
+            | Linux headless (arm64) | `clowderd-linux-arm64` | `chmod +x`; static |
 
-            On macOS, unzip and drag `Clowder.app` into Applications. If the
-            system blocks the first launch, right-click it and choose Open.
-            The `clowderd-*` archives contain the static CLI, a systemd unit
-            and install notes; see `README.md` inside. Each archive has a
-            `.sha256` checksum file.
+            The macOS GUI is an unsigned `.app` inside a `.dmg`: open it,
+            drag `Clowder.app` to Applications, and right-click → Open on the
+            first launch. The CLI is also inside
+            `Clowder.app/Contents/MacOS/clowderd`.
+
+            Outside macOS, release assets are plain binaries, not archives:
+            `chmod +x` and run. macOS CLI downloads are quarantined; remove
+            the attribute with `xattr -d com.apple.quarantine <file>`.
+
+            Every binary and DMG has a `.sha256`. `clowderd.service` and `HEADLESS.md`
+            are attached for the headless CLI.

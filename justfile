@@ -54,34 +54,28 @@ build-release: _bin
     go build -trimpath -ldflags "{{ldflags}} -s -w" -o bin/clowder ./cmd/clowder
     CGO_ENABLED=0 go build -trimpath -ldflags "{{ldflags}} -s -w" -o bin/clowderd ./cmd/clowderd
 
-# Build the headless CLI as a static Linux binary for servers. No GTK,
-# WebKitGTK or libc: it runs on a minimal image.
+# Build the headless CLI as a static Linux binary for servers (no GTK/libc).
 headless arch="amd64": _bin
     CGO_ENABLED=0 GOOS=linux GOARCH={{arch}} \
         go build -trimpath -ldflags "{{ldflags}} -s -w" \
         -o bin/clowderd-linux-{{arch}} ./cmd/clowderd
 
-# Package the headless CLI with a systemd unit, install notes and checksum.
-package-headless arch="amd64": (headless arch)
+# Stage the static Linux CLI binaries and checksums in dist/, with no archive.
+dist-headless: (headless "amd64") (headless "arm64")
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p dist
-    d="dist/headless-{{arch}}"
-    rm -rf "$d"
-    mkdir -p "$d"
-    cp "bin/clowderd-linux-{{arch}}" "$d/clowderd"
-    cp packaging/clowderd.service "$d/"
-    cp docs/HEADLESS.md "$d/README.md"
-    cp LICENSE "$d/"
-    tar -czf "dist/clowderd-linux-{{arch}}.tar.gz" -C "$d" .
-    if command -v sha256sum >/dev/null 2>&1; then
-        ( cd dist && sha256sum "clowderd-linux-{{arch}}.tar.gz" \
-            > "clowderd-linux-{{arch}}.sha256" )
-    else
-        ( cd dist && shasum -a 256 "clowderd-linux-{{arch}}.tar.gz" \
-            > "clowderd-linux-{{arch}}.sha256" )
-    fi
-    echo "wrote dist/clowderd-linux-{{arch}}.tar.gz"
+    for arch in amd64 arm64; do
+        cp "bin/clowderd-linux-$arch" "dist/clowderd-linux-$arch"
+        if command -v sha256sum >/dev/null 2>&1; then
+            ( cd dist && sha256sum "clowderd-linux-$arch" \
+                > "clowderd-linux-$arch.sha256" )
+        else
+            ( cd dist && shasum -a 256 "clowderd-linux-$arch" \
+                > "clowderd-linux-$arch.sha256" )
+        fi
+    done
+    echo "staged dist/clowderd-linux-{amd64,arm64}"
 
 # Build the desktop app with the interactive terminal (libghostty).
 # Run `just ghostty-lib` first.

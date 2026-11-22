@@ -19,39 +19,52 @@ Clowder asks for none of that. Two machines agree on one address out of band, an
 
 ## Install
 
-Download the package for your platform from [Releases](https://github.com/AndPuQing/clowder/releases).
+Download the file for your platform from [Releases](https://github.com/AndPuQing/clowder/releases). macOS ships as a DMG; the other platforms are plain binaries.
 
-| Platform | File | Before you run it |
+| Platform | GUI | CLI |
 |---|---|---|
-| macOS (Apple Silicon) | `clowder-darwin-arm64.zip` | Unzip, drag `Clowder.app` into Applications |
-| macOS (Intel) | `clowder-darwin-amd64.zip` | Same |
-| Windows | `clowder-windows-amd64.zip` | WebView2 runtime (included in Windows 11) |
-| Linux (GUI) | `clowder-linux-amd64.tar.gz` | `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` |
-| Linux headless (amd64) | `clowderd-linux-amd64.tar.gz` | — static binary |
-| Linux headless (arm64) | `clowderd-linux-arm64.tar.gz` | — static binary |
+| macOS (Apple Silicon) | `clowder-darwin-arm64.dmg` | `clowderd-darwin-arm64` |
+| macOS (Intel) | `clowder-darwin-amd64.dmg` | `clowderd-darwin-amd64` |
+| Windows | `clowder-windows-amd64.exe` | `clowderd-windows-amd64.exe` |
+| Linux (GUI) | `clowder-linux-amd64` | — |
+| Linux headless (amd64) | — | `clowderd-linux-amd64` |
+| Linux headless (arm64) | — | `clowderd-linux-arm64` |
 
-The macOS builds are not signed or notarized. The first launch is blocked by Gatekeeper: right-click the app, then choose **Open**.
+The Windows GUI needs the WebView2 runtime (included in Windows 11).
 
-Linux (desktop):
+macOS: open the DMG and drag `Clowder.app` into Applications. The build is not
+signed or notarized, so the first launch is blocked by Gatekeeper: right-click
+the app, then choose **Open**. The CLI is also inside
+`Clowder.app/Contents/MacOS/clowderd`, and a raw `clowderd-darwin-*` binary is
+attached for scripts:
+
+```sh
+chmod +x clowderd-darwin-arm64
+xattr -d com.apple.quarantine clowderd-darwin-arm64
+./clowderd-darwin-arm64
+```
+
+Linux binaries and the macOS CLI need the executable bit. The Linux GUI also
+needs the runtime libraries:
 
 ```sh
 sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1
-tar -xzf clowder-linux-amd64.tar.gz
-./clowder
+chmod +x clowder-linux-amd64
+./clowder-linux-amd64
 ```
 
-Linux headless servers use a separate, statically linked CLI package with no
-GTK, WebKitGTK or libc dependency:
+Linux headless servers use a separate, statically linked CLI with no GTK,
+WebKitGTK or libc dependency:
 
 ```sh
-tar -xzf clowderd-linux-amd64.tar.gz
-sudo install -m 0755 clowderd /usr/local/bin/
+chmod +x clowderd-linux-amd64
+sudo install -m 0755 clowderd-linux-amd64 /usr/local/bin/clowderd
 clowderd serve -expose 8080
 ```
 
-The archive also contains a systemd unit and install notes; see
-[`docs/HEADLESS.md`](docs/HEADLESS.md). Use `clowderd-linux-arm64.tar.gz` on
-ARM64.
+The systemd unit is [`packaging/clowderd.service`](packaging/clowderd.service)
+and the install notes are [`docs/HEADLESS.md`](docs/HEADLESS.md); both are also
+attached to each release. Every binary and DMG has a `.sha256` file.
 
 ## Use it
 
@@ -169,8 +182,8 @@ Because the address *is* the credential, treat it like a password for the durati
 ## Command line
 
 The same engine ships as `clowderd`, for headless machines and scripts. The
-release provides it as a separate static Linux archive
-([`clowderd-linux-*.tar.gz`](docs/HEADLESS.md)):
+release provides it as a separate static Linux binary
+([`clowderd-linux-*`](docs/HEADLESS.md)):
 
 ```sh
 # share this machine's 8080
@@ -204,7 +217,7 @@ With [just](https://github.com/casey/just):
 ```sh
 just                 # build clowder and clowderd into bin/
 just headless        # build the static Linux CLI (amd64; pass arm64 for ARM)
-just package-headless  # make dist/clowderd-linux-amd64.tar.gz
+just dist-headless     # stage dist/clowderd-linux-{amd64,arm64}
 just check           # gofmt, go vet, tests
 just e2e             # tunnel a local HTTP file through DERP (needs network)
 just build-ghostty   # the app with the interactive terminal (see docs/GHOSTTY.md)
