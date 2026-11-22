@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -41,7 +42,8 @@ func TestKeyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat key: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Go synthesizes mode bits from file attributes on Windows.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Fatalf("key file mode = %o, want 600", perm)
 	}
 
