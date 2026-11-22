@@ -32,9 +32,12 @@ Download the file for your platform from [Releases](https://github.com/AndPuQing
 
 The Windows GUI needs the WebView2 runtime (included in Windows 11).
 
-macOS: open the DMG and drag `Clowder.app` into Applications. The build is not
-signed or notarized, so the first launch is blocked by Gatekeeper: right-click
-the app, then choose **Open**. The CLI is also inside
+On macOS, open the DMG and drag `Clowder.app` into Applications. If macOS
+blocks a build you trust, open **System Settings → Privacy & Security** and
+choose **Open Anyway** when available. For the official v0.7.0 downloads,
+see the installation note on the
+[release page](https://github.com/AndPuQing/clowder/releases/tag/v0.7.0).
+The CLI is also inside
 `Clowder.app/Contents/MacOS/clowderd`, and a raw `clowderd-darwin-*` binary is
 attached for scripts:
 
@@ -232,6 +235,15 @@ go build -o clowderd ./cmd/clowderd    # the command line tool
 ```
 
 This machine keeps its Go toolchain outside `PATH`; `source scripts/env.sh` points at it, and the justfile does the same. On Linux the app loads GTK 3 at runtime (`libgtk-3-0`); WebKitGTK and the Ayatana appindicator are used when present (web view and tray). Releases are built natively on GitHub Actions for each platform — see [`.github/workflows/release.yml`](.github/workflows/release.yml). There is a container setup for Linux GUI work in [`dev/`](dev/).
+
+The macOS release job verifies the signature and architecture of both
+executables inside each DMG. To sign with Developer ID and notarize the disk
+images, set these GitHub Actions secrets:
+
+- `MACOS_CERTIFICATE` holds the base64-encoded Developer ID Application `.p12`.
+- `MACOS_CERTIFICATE_PASSWORD` holds the export password.
+- `MACOS_NOTARY_KEY` holds the App Store Connect API key in `.p8` format.
+- `MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER_ID` identify that key.
 
 ## Design
 

@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (for example v0.1.0)"
+        description: "Version to build (for example v0.7.0)"
         required: true
 
 permissions:
   contents: write
 
 env:
-  VERSION: ${{ github.ref_name }}
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
 
 jobs:
   linux:
@@ -100,10 +100,55 @@ jobs:
       - name: Build both arches
         env:
           CGO_ENABLED: "1"
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
         run: |
           set -eu
           mkdir -p out
           LDFLAGS="-s -w -X github.com/AndPuQing/clowder/core.Version=${VERSION}"
+
+          sign_args=(--sign -)
+          signing_dir=""
+          mount_dir=""
+          cleanup() {
+            if [ -n "$mount_dir" ]; then
+              hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+              rmdir "$mount_dir" || true
+            fi
+            if [ -n "$signing_dir" ]; then
+              security delete-keychain "$signing_dir/release.keychain-db" || true
+              rm -rf "$signing_dir"
+            fi
+          }
+          trap cleanup EXIT
+
+          if [ -n "${MACOS_CERTIFICATE}${MACOS_CERTIFICATE_PASSWORD}${MACOS_NOTARY_KEY}${MACOS_NOTARY_KEY_ID}${MACOS_NOTARY_ISSUER_ID}" ]; then
+            : "${MACOS_CERTIFICATE:?Set the base64-encoded Developer ID certificate}"
+            : "${MACOS_CERTIFICATE_PASSWORD:?Set the Developer ID certificate password}"
+            : "${MACOS_NOTARY_KEY:?Set the App Store Connect API private key}"
+            : "${MACOS_NOTARY_KEY_ID:?Set the App Store Connect key ID}"
+            : "${MACOS_NOTARY_ISSUER_ID:?Set the App Store Connect issuer ID}"
+
+            signing_dir=$(mktemp -d "$RUNNER_TEMP/clowder-signing.XXXXXX")
+            keychain="$signing_dir/release.keychain-db"
+            keychain_password=$(openssl rand -hex 24)
+            printf '%s' "$MACOS_CERTIFICATE" | base64 -D > "$signing_dir/developer-id.p12"
+            printf '%s\n' "$MACOS_NOTARY_KEY" > "$signing_dir/notary.p8"
+            security create-keychain -p "$keychain_password" "$keychain"
+            security set-keychain-settings -lut 7200 "$keychain"
+            security unlock-keychain -p "$keychain_password" "$keychain"
+            security list-keychains -d user -s "$keychain"
+            security import "$signing_dir/developer-id.p12" -f pkcs12 -k "$keychain" \
+              -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+            identity=$(security find-identity -v -p codesigning "$keychain" |
+              awk '/"Developer ID Application: / {print $2; exit}')
+            : "${identity:?The certificate must be a valid Developer ID Application identity}"
+            sign_args=(--sign "$identity" --keychain "$keychain" --options runtime --timestamp)
+          fi
 
           # Go's GOARCH names differ from clang's -arch names
           clang_arch() {
@@ -145,16 +190,44 @@ jobs:
           </plist>
           PLIST
 
+            codesign --force "${sign_args[@]}" "$app/Contents/MacOS/clowderd"
+            codesign --force "${sign_args[@]}" "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+
             stage="$d/dmg"
+            dmg="out/clowder-darwin-$arch.dmg"
             mkdir -p "$stage"
-            cp -R "$app" "$stage/"
+            ditto "$app" "$stage/Clowder.app"
             ln -s /Applications "$stage/Applications"
-            hdiutil create -volname "Clowder" -srcfolder "$stage" \
-              -ov -format UDZO "out/clowder-darwin-$arch.dmg"
+            hdiutil create -volname "Clowder" -srcfolder "$stage" -ov -format UDZO "$dmg"
+            if [ -n "$signing_dir" ]; then
+              codesign --force --sign "$identity" --keychain "$keychain" --timestamp "$dmg"
+              xcrun notarytool submit "$dmg" --key "$signing_dir/notary.p8" \
+                --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER_ID" --wait
+              xcrun stapler staple "$dmg"
+              xcrun stapler validate "$dmg"
+            fi
+
+            hdiutil verify "$dmg"
+            mount_dir=$(mktemp -d "$RUNNER_TEMP/clowder-mount.XXXXXX")
+            hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
+            mounted_app="$mount_dir/Clowder.app"
+            codesign --verify --deep --strict --verbose=2 "$mounted_app"
+            [ "$(lipo -archs "$mounted_app/Contents/MacOS/Clowder")" = "$ca" ]
+            [ "$(lipo -archs "$mounted_app/Contents/MacOS/clowderd")" = "$ca" ]
+            if [ "$ca" = "$(uname -m)" ]; then
+              [ "$("$mounted_app/Contents/MacOS/Clowder" --version)" = "clowder $VERSION" ]
+              [ "$("$mounted_app/Contents/MacOS/clowderd" --version)" = "clowderd $VERSION" ]
+            fi
+            hdiutil detach "$mount_dir"
+            if [ -d "$mount_dir" ]; then
+              rmdir "$mount_dir"
+            fi
+            mount_dir=""
             ( cd out && shasum -a 256 "clowder-darwin-$arch.dmg" \
                 > "clowder-darwin-$arch.dmg.sha256" )
 
-            cp "$d/clowderd" "out/clowderd-darwin-$arch"
+            cp "$app/Contents/MacOS/clowderd" "out/clowderd-darwin-$arch"
             ( cd out && shasum -a 256 "clowderd-darwin-$arch" \
                 > "clowderd-darwin-$arch.sha256" )
           done
@@ -242,9 +315,9 @@ jobs:
             | Linux headless (amd64) | `clowderd-linux-amd64` | `chmod +x`; static |
             | Linux headless (arm64) | `clowderd-linux-arm64` | `chmod +x`; static |
 
-            The macOS GUI is an unsigned `.app` inside a `.dmg`: open it,
-            drag `Clowder.app` to Applications, and right-click → Open on the
-            first launch. The CLI is also inside
+            Open the macOS DMG and drag `Clowder.app` to Applications. If macOS
+            blocks a build that you trust, check **System Settings → Privacy &
+            Security** for **Open Anyway**. The CLI is also inside
             `Clowder.app/Contents/MacOS/clowderd`.
 
             Outside macOS, release assets are plain binaries, not archives:
