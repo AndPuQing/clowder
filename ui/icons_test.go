@@ -11,7 +11,7 @@ import (
 func TestIconAssetsLoad(t *testing.T) {
 	names := []string{
 		"alert", "chevron-left", "chevron-right", "chevron-up", "connect",
-		"copy", "download", "file", "folder", "globe", "hash", "host", "key",
+		"copy", "download", "edit", "file", "folder", "globe", "hash", "host", "key",
 		"mark", "network", "peer", "play", "plus", "radio", "refresh", "send",
 		"settings", "share", "stop", "terminal", "trash", "tray", "x",
 	}

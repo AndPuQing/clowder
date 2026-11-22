@@ -18,6 +18,10 @@ import (
 const (
 	terminalCols = 80
 	terminalRows = 24
+
+	terminalBackground = "#10141D"
+	terminalText       = "#EBEFF7"
+	terminalMuted      = "#A5B0C3"
 )
 
 // termSession is one interactive terminal session: an SSH shell over the
@@ -220,7 +224,7 @@ func (a *App) terminalPane(c *myui.Context, id string) {
 	}
 
 	pane := myui.Column(c).FillWidth().Radius(radControl).
-		Background(myui.Hex(termBg)).Border(1, myui.Hex(colLine)).
+		Background(myui.Hex(terminalBackground)).Border(1, separatorColor(c)).
 		Padding(10).Gap(0)
 	pane.Focusable().HandleInput(func(ev myui.InputEvent) bool {
 		b := terminalInput(ev)
@@ -235,7 +239,7 @@ func (a *App) terminalPane(c *myui.Context, id string) {
 	if snap == nil {
 		pane.Children(func() {
 			myui.Text(c, "…").Font(fontMono).FontSize(12).
-				TextColor(myui.Hex(colDim))
+				TextColor(myui.Hex(terminalMuted))
 		})
 		return
 	}
@@ -266,7 +270,7 @@ func (a *App) terminalPane(c *myui.Context, id string) {
 			})
 		}
 		if msg := ts.errText(); msg != "" {
-			myui.Text(c, msg).FontSize(11).TextColor(myui.Hex(colDim)).
+			myui.Text(c, msg).FontSize(11).TextColor(myui.Hex(terminalMuted)).
 				Padding(4, 0)
 		}
 	})
@@ -339,13 +343,13 @@ func (a *App) drawRun(c *myui.Context, cells []core.Cell, fg, bg string, fontSiz
 func cellColors(cell core.Cell, cursor bool) (fg, bg string) {
 	fg, bg = cell.Fg, cell.Bg
 	if fg == "" {
-		fg = colCream
+		fg = terminalText
 	}
 	if cell.Inverse {
 		// Swap the two inks. An unset background means "the terminal
 		// background", so the inverse block takes the foreground colour.
 		if bg == "" {
-			bg, fg = fg, termBg
+			bg, fg = fg, terminalBackground
 		} else {
 			fg, bg = bg, fg
 		}
@@ -354,7 +358,7 @@ func cellColors(cell core.Cell, cursor bool) (fg, bg string) {
 		// The cursor block is the cell's ink, its text the cell's background.
 		text := bg
 		if text == "" {
-			text = termBg
+			text = terminalBackground
 		}
 		fg, bg = text, fg
 	}

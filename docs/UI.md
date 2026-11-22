@@ -34,14 +34,12 @@ that is data the user cannot infer.
 
 ## Surfaces and depth
 
-- Three surface values: window, card, raised control. A card is one step
-  above the window, a control one step above the card.
-- Hierarchy comes from value, a 1 px hairline and one soft shadow — not from
-  gradients used as decoration. A gradient may describe a surface (top lit,
-  bottom in shadow), never a mood.
-- One accent (gold) and two semantic colours (green, red). Nothing else is
-  coloured.
-- Corners are small and consistent: 8 px controls, 12 px cards.
+- Follow the system appearance and use its accent where available. The
+  fallback accent is blue. Green and red indicate success and failure.
+- Keep content surfaces opaque. The inset sidebar takes the native
+  material where available and uses a solid fill with reduced transparency.
+- Use 1 px separators and 18 px card corners. Keep the controls compact
+  with 10 px corners.
 - Density is a desktop tool's, not a landing page's: grouped rows, aligned
   controls, no oversized empty bands.
 

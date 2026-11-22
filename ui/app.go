@@ -1,8 +1,7 @@
 // Package ui implements Clowder's desktop interface.
 //
 // Layout: a rail of devices on the left, the selected device's detail on
-// the right. Visual language: a quiet green-and-cream palette with a
-// single gold accent; the tunnel address is the one thing on screen.
+// the right, with connection controls above the scrolling content.
 package ui
 
 import (
@@ -12,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,48 +23,6 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/AndPuQing/clowder/core"
-)
-
-const (
-	fontUI   = "Noto Sans CJK SC"
-	fontMono = "Noto Sans Mono CJK SC"
-
-	// The palette is a dark, slightly green-neutral set of surfaces, one warm
-	// accent and two semantic colours. Surfaces step up in value so panels
-	// read as raised; hairlines are the only ornament.
-	colBg      = "#101614"
-	colBgTop   = "#151D1A"
-	colRail    = "#0B100E"
-	colRailTop = "#0F1613"
-
-	colPanel    = "#18211E"
-	colPanelHi  = "#1D2925"
-	colHover    = "#161F1C"
-	colSelected = "#1B2723"
-
-	colLine   = "#2A3732"
-	colLineHi = "#35463F"
-
-	colCream = "#ECEAE3"
-	colText2 = "#C3CCC7"
-	colDim   = "#8A9992"
-
-	colGold   = "#D6A93C"
-	colGoldHi = "#E5BB55"
-	colGoldLo = "#BE9129"
-	colInk    = "#171A12"
-
-	colGood   = "#6FC49A"
-	colDanger = "#E06C5B"
-
-	// terminal background, darker than the window
-	termBg = "#0A0F0D"
-
-	// Rounded corners: controls 8, cards 12, rows 8, panels 16
-	radControl = 8
-	radCard    = 12
-	radRow     = 8
-	radPanel   = 16
 )
 
 // demoAddr is a sample address used by the demo/screenshot mode. It is
@@ -134,6 +92,13 @@ type browseState struct {
 	seq     uint64 // invalidates results of superseded directory loads
 }
 
+type clipboardFeedback struct {
+	deviceID string
+	value    string
+	at       time.Time
+	failed   bool
+}
+
 // App is the interface state.
 type App struct {
 	mu      sync.Mutex
@@ -142,8 +107,11 @@ type App struct {
 	sel     string
 	rt      map[string]*runtime
 	drafts  map[string]*drafts
-	copied  time.Time
-	theme   *myui.Theme
+
+	nameField     myui.Handle
+	railSelection string
+	optionsDevice string
+	clipboard     clipboardFeedback
 
 	tray     *mygo.Tray
 	quitting bool
@@ -181,11 +149,6 @@ func New() *App {
 		socksPortIn:  fmt.Sprint(settings.SocksPort),
 		derpIn:       settings.DERPMapURL,
 		derpRegionIn: fmt.Sprint(settings.DERPMapRegion),
-		theme: func() *myui.Theme {
-			t := myui.DarkTheme().WithAccent(myui.Hex(colGold))
-			t.Radius = radControl // one radius for buttons, fields and switches
-			return t
-		}(),
 	}
 	if list, err := core.LoadDevices(); err == nil {
 		for i := range list {
@@ -255,15 +218,21 @@ func (a *App) Run() error {
 		a.mu.Unlock()
 		mygo.App.SetLocale(lang)
 
-		w := mygo.NewWindow(mygo.WindowOptions{
-			Title:         "Clowder",
-			Width:         1000,
-			Height:        720,
-			MinWidth:      880,
-			MinHeight:     640,
-			TitleBarStyle: mygo.TitleBarHidden,
-			Content:       myui.View(a.view),
-		})
+		options := mygo.WindowOptions{
+			Title:           "Clowder",
+			Width:           1000,
+			Height:          720,
+			MinWidth:        880,
+			MinHeight:       640,
+			TitleBarStyle:   mygo.TitleBarHiddenInset,
+			TitleBarHeight:  36,
+			BackgroundColor: "light-dark(" + lightBackground + ", " + darkBackground + ")",
+			Content:         myui.View(a.view),
+		}
+		if goruntime.GOOS == "darwin" {
+			options.Vibrancy = mygo.VibrancySidebar
+		}
+		w := mygo.NewWindow(options)
 		if pngIcon := trayIcon(); pngIcon != nil {
 			_ = w.SetIcon(pngIcon)
 		}
@@ -316,7 +285,11 @@ func (a *App) refresh() {
 
 // view draws the whole window.
 func (a *App) view(c *myui.Context) {
-	c.SetTheme(a.theme)
+	prefs := c.Preferences()
+	c.SetTheme(currentAppearance(c).theme.WithPreferences(prefs))
+	if c.Vibrancy() && !prefs.ReduceTransparency {
+		c.Root().Background(myui.Transparent)
+	}
 
 	a.mu.Lock()
 	devices := append([]*core.Device(nil), a.devices...)
@@ -324,538 +297,438 @@ func (a *App) view(c *myui.Context) {
 	settings := a.showSettings
 	a.mu.Unlock()
 
-	myui.Row(c).Fill().
-		LinearGradient(myui.LinearGradient{
-			From:  myui.Hex(colBgTop),
-			To:    myui.Hex(colBg),
-			Angle: 150,
-		}).
-		Children(func() {
-			a.rail(c, devices, sel, settings)
-
-			myui.Row(c).Width(1).FillHeight().Background(myui.Hex(colLine))
-
-			myui.Column(c).Grow(1).FillHeight().Children(func() {
-				// The top strip is the window's drag handle.
-				myui.Row(c).Height(34).FillWidth().DragWindow()
-
-				myui.Column(c).Grow(1).FillWidth().Padding(30, 28).
-					Children(func() {
-						myui.Column(c).FillWidth().MaxWidth(720).Gap(22).
-							Children(func() {
-								if settings {
-									a.settingsPane(c)
-									return
-								}
-
-								dev, ok := findDevice(devices, sel)
-								if !ok {
-									myui.Row(c).Grow(1)
-									iconText(c, "mark", T("empty.noSelection"), 18, 13,
-										myui.Hex(colDim))
-									myui.Row(c).Grow(1)
-									return
-								}
-								// The detail can outgrow the window (terminal,
-								// file browser), so it scrolls.
-								myui.Scroll(c).Grow(1).FillWidth().Children(func() {
-									myui.Column(c).Gap(22).FillWidth().Children(func() {
-										if dev.Role == core.RoleHost {
-											a.hostDetail(c, dev)
-										} else {
-											a.peerDetail(c, dev)
-										}
-										myui.Row(c).Height(12)
-									})
-								})
-							})
+	myui.Row(c).Fill().Children(func() {
+		a.rail(c, devices, sel, settings)
+		myui.Column(c).Grow(1).MinWidth(0).FillHeight().Padding(0, detailPadding).
+			Background(c.Theme().Background).Children(func() {
+			myui.Row(c).Height(max(34, c.TitleBar().Bottom)).FillWidth().Shrink(0).DragWindow()
+			myui.Column(c).FillWidth().MaxWidth(detailMaxWidth).AlignSelf(myui.Center).
+				Grow(1).MinHeight(0).Padding(10, 0, 0).Children(func() {
+				if settings {
+					a.settingsPane(c)
+				} else if dev, ok := findDevice(devices, sel); ok {
+					a.devicePane(c, dev)
+				} else {
+					myui.Column(c).FillWidth().Grow(1).Center().Children(func() {
+						myui.Text(c, T("empty.noSelection")).TextColor(c.Theme().TextMuted)
 					})
+				}
 			})
 		})
+	})
 
 	// Widgets write straight into the bound values; catch any change here
 	// and schedule a debounced write.
 	a.persistIfChanged()
 }
 
-// rail draws the device list on the left.
+// rail draws the scrollable device list and its fixed controls.
 func (a *App) rail(c *myui.Context, devices []*core.Device, sel string, settings bool) {
-	cream := myui.Hex(colCream)
-	text2 := myui.Hex(colText2)
-	dim := myui.Hex(colDim)
-	gold := myui.Hex(colGold)
+	t := c.Theme()
+	background := currentAppearance(c).sidebar
+	if c.Vibrancy() && !c.Preferences().ReduceTransparency {
+		background = background.Alpha(0.52)
+	}
+	if settings {
+		a.railSelection = ""
+	}
 
-	myui.Column(c).Width(252).FillHeight().
-		LinearGradient(myui.LinearGradient{
-			From:  myui.Hex(colRailTop),
-			To:    myui.Hex(colRail),
-			Angle: 180,
-		}).
-		BorderWidth(0, 1, 0, 0).BorderColor(myui.Hex(colLine)).
-		Children(func() {
-			myui.Row(c).Height(34).FillWidth().DragWindow()
-
-			// Brand.
-			myui.Row(c).FillWidth().Padding(8, 16).Gap(10).AlignItems(myui.Center).
-				Children(func() {
-					tile := myui.Box(c).Size(26, 26).Radius(7).Center().
-						Background(gold).Shrink(0)
-					tile.Children(func() { iconEl(c, "mark", 17, myui.Hex(colInk)) })
-					myui.Text(c, "Clowder").Font(fontUI).FontSize(15).
-						FontWeight(700).LetterSpacing(-0.2).TextColor(cream)
+	myui.Column(c).Width(railWidth).FillHeight().Shrink(0).Padding(railInset).Children(func() {
+		myui.Column(c).Fill().Background(background).Radius(22).Border(1, separatorColor(c)).
+			Children(func() {
+				bar := c.TitleBar()
+				if bar.Left > 0 {
+					myui.Row(c).Height(max(0, bar.Bottom-railInset+4)).
+						FillWidth().Shrink(0).DragWindow()
+				}
+				myui.Row(c).FillWidth().Padding(16, 13, 17).Gap(9).AlignItems(myui.Center).
+					Shrink(0).DragWindow().Children(func() {
+					myui.Box(c).Size(27, 27).Radius(8).Center().Shrink(0).
+						Background(t.Accent).Children(func() {
+						iconEl(c, "mark", 17, t.AccentText)
+					})
+					myui.Text(c, "Clowder").FontSize(15).FontWeight(650).
+						LetterSpacing(-0.2).TextColor(t.Text)
 				})
 
-			myui.Column(c).FillWidth().Padding(10, 12).Gap(3).Children(func() {
-				myui.Row(c).Padding(4, 8).Children(func() {
-					sectionLabel(c, T("nav.machines"))
-				})
-				for _, d := range devices {
-					d := d
-					selected := d.ID == sel && !settings
-					status, statusColor := a.deviceStatus(d)
-					row := myui.Row(c).FillWidth().Gap(10).AlignItems(myui.Center).
-						Padding(8, 9).Radius(radRow)
-					if selected {
-						row.Background(myui.Hex(colSelected)).
-							BorderWidth(0, 0, 0, 2).BorderColor(gold)
-					} else if row.Hovered() {
-						row.Background(myui.Hex(colHover))
-					}
-					row.Cursor(myui.CursorPointer)
-					row.Children(func() {
-						tile := myui.Box(c).Size(28, 28).Radius(7).Center().Shrink(0)
-						if selected {
-							tile.Background(myui.Hex(colPanelHi))
-						} else {
-							tile.Background(myui.Hex(colPanel))
-						}
-						tile.Children(func() {
-							roleIcon := "host"
-							if d.Role == core.RolePeer {
-								roleIcon = "peer"
+				myui.Row(c).FillWidth().Padding(1, 8, 4, 13).Gap(6).AlignItems(myui.Center).
+					Shrink(0).Children(func() {
+					myui.Text(c, T("nav.machines")).FontSize(12).FontWeight(600).
+						TextColor(t.TextMuted).Grow(1)
+					iconButton(c, "plus", T("nav.addMachine"), t.TextMuted).
+						PopoverMenuButton(func(m *myui.Menu) {
+							if m.Item(T("nav.host")).Chosen() {
+								a.addDevice(core.RoleHost)
 							}
-							fg := text2
-							if selected {
-								fg = cream
+							if m.Item(T("nav.join")).Chosen() {
+								a.addDevice(core.RolePeer)
 							}
-							iconEl(c, roleIcon, 16, fg)
+						}, myui.PopoverMenuButtonOptions{
+							At:   myui.AnchorBottomEnd,
+							Self: myui.AnchorTopEnd,
 						})
-						myui.Column(c).Gap(3).Grow(1).Children(func() {
-							name := myui.Text(c, d.Name).FontSize(13).
-								TextColor(text2).SingleLine().TruncateMiddle()
-							if selected {
-								name.FontWeight(600).TextColor(cream)
+				})
+
+				myui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
+					myui.Column(c).FillWidth().Padding(0, 8, 8).Gap(2).Children(func() {
+						for _, d := range devices {
+							selected := d.ID == sel && !settings
+							status := deviceStatus(d.Role, a.runtimeSnapshot(d.ID))
+							row := navButton(c.Key(d.ID), selected).
+								Label(d.Name + ", " + T(status)).Tooltip(d.Name)
+							if selected && a.railSelection != d.ID {
+								row.ScrollIntoView()
+								a.railSelection = d.ID
 							}
-							myui.Row(c).Gap(5).AlignItems(myui.Center).Children(func() {
-								myui.Box(c).Size(5, 5).Radius(3).
-									Background(statusColor).Shrink(0)
-								myui.Text(c, status).FontSize(10.5).
-									TextColor(dim).SingleLine()
+							row.Children(func() {
+								fg := t.TextMuted
+								if selected {
+									fg = t.Text.Mix(t.Accent, 0.78)
+								}
+								iconEl(c, deviceIcon(d.Role), 18, fg)
+								myui.Column(c).Gap(2).Grow(1).MinWidth(0).Children(func() {
+									name := myui.Text(c, d.Name).FontSize(13).
+										TextColor(t.Text).SingleLine().TruncateMiddle()
+									if selected {
+										name.FontWeight(600)
+									}
+									statusLine(c, status, 11)
+								})
 							})
+							row.OnClick(func() {
+								a.mu.Lock()
+								a.sel = d.ID
+								a.showSettings = false
+								a.mu.Unlock()
+								a.refresh()
+							})
+						}
+					})
+				})
+
+				myui.Column(c).FillWidth().Padding(0, 8, 8).Gap(6).Shrink(0).Children(func() {
+					myui.Row(c).Height(1).FillWidth().Background(separatorColor(c))
+					navButton(c, settings).Label(T("nav.settings")).
+						Children(func() { iconText(c, "settings", T("nav.settings"), 17, 13, t.Text) }).
+						OnClick(func() {
+							a.mu.Lock()
+							a.showSettings = true
+							a.mu.Unlock()
+							a.refresh()
 						})
-					})
-					row.OnClick(func() {
-						a.mu.Lock()
-						a.sel = d.ID
-						a.showSettings = false
-						a.mu.Unlock()
-						a.refresh()
-					})
-				}
-			})
-
-			myui.Row(c).Grow(1)
-
-			// Footer: creating a machine, then settings.
-			myui.Column(c).FillWidth().Padding(10, 12).Gap(2).Children(func() {
-				myui.Row(c).Height(1).FillWidth().
-					Background(myui.Hex(colLine)).Padding(0, 8)
-
-				addRow := func(name, label string, fn func()) {
-					row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
-						Padding(7, 9).Radius(radRow)
-					row.Cursor(myui.CursorPointer)
-					if row.Hovered() {
-						row.Background(myui.Hex(colHover))
-					}
-					row.Children(func() {
-						iconEl(c, name, 15, dim)
-						myui.Text(c, label).FontSize(12.5).
-							TextColor(text2).SingleLine()
-					})
-					row.OnClick(fn)
-				}
-				addRow("plus", T("nav.host"), func() { a.addDevice(core.RoleHost) })
-				addRow("plus", T("nav.join"), func() { a.addDevice(core.RolePeer) })
-
-				row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
-					Padding(7, 9).Radius(radRow)
-				row.Cursor(myui.CursorPointer)
-				fg := text2
-				if settings {
-					row.Background(myui.Hex(colSelected))
-					fg = cream
-				} else if row.Hovered() {
-					row.Background(myui.Hex(colHover))
-				}
-				row.Children(func() {
-					iconEl(c, "settings", 15, fg)
-					myui.Text(c, T("nav.settings")).FontSize(12.5).
-						TextColor(fg).SingleLine()
-				})
-				row.OnClick(func() {
-					a.mu.Lock()
-					a.showSettings = true
-					a.mu.Unlock()
-					a.refresh()
 				})
 			})
-		})
+	})
 }
 
-// hostDetail draws the "share a port" side of a device.
-func (a *App) hostDetail(c *myui.Context, d *core.Device) {
-	cream := myui.Hex(colCream)
-	text2 := myui.Hex(colText2)
-	dim := myui.Hex(colDim)
-	gold := myui.Hex(colGold)
+func deviceIcon(role string) string {
+	if role == core.RoleHost {
+		return "host"
+	}
+	return "peer"
+}
 
-	// Sharing files is part of the SSH service; keep the two switches
-	// consistent when SSH is turned off.
-	if !d.SSH && d.Files {
+func (a *App) devicePane(c *myui.Context, d *core.Device) {
+	// File sharing uses the host's SSH service.
+	if d.Role == core.RoleHost && !d.SSH {
 		d.Files = false
 	}
-
 	rt := a.runtimeSnapshot(d.ID)
-	running := rt.srv != nil
-	addr := rt.addr
 	dr := a.deviceDrafts(d)
-	status, statusColor := a.deviceStatus(d)
+	optionsEnabled := rt.srv == nil && rt.cli == nil
+	if !optionsEnabled && a.optionsDevice == d.ID {
+		a.optionsDevice = ""
+	}
+	showOptions := a.optionsDevice == d.ID
 
-	// Header.
-	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
-		headerTile(c, "host", gold)
-		myui.Column(c).Gap(6).Grow(1).Children(func() {
-			if myui.TextInputBase(c, dr.name).Font(fontUI).FontSize(22).
-				FontWeight(700).LetterSpacing(-0.4).TextColor(cream).FillWidth().MaxWidth(300).Changed() {
-				a.renameDevice(d, dr, *dr.name)
+	myui.Column(c.Key(d.ID)).FillWidth().Grow(1).MinHeight(0).Gap(16).Children(func() {
+		a.deviceHeader(c, d, dr, rt)
+		myui.Row(c).AlignSelf(myui.Start).Gap(2).Padding(3).Radius(12).
+			Background(c.Theme().Surface).Shrink(0).Children(func() {
+			segmentButton(c, T("section.connection"), !showOptions).Padding(6, 16).
+				OnClick(func() { a.optionsDevice = "" })
+			option := segmentButton(c, T("section.options"), showOptions).Padding(6, 16).
+				Disabled(!optionsEnabled).OnClick(func() { a.optionsDevice = d.ID })
+			if !optionsEnabled {
+				option.Tooltip(T("options.locked"))
 			}
-			statusChip(c, status, statusColor)
+		})
+		myui.Scroll(c.Key(showOptions)).Grow(1).MinHeight(0).FillWidth().Children(func() {
+			myui.Column(c).FillWidth().Padding(2, 0, 24).Gap(18).Children(func() {
+				if rt.errMsg != "" {
+					notice(c, "alert", rt.errMsg, c.Theme().Danger)
+				}
+				switch {
+				case showOptions && d.Role == core.RoleHost:
+					a.hostOptions(c, d, dr)
+				case showOptions:
+					a.peerOptions(c, d)
+				case d.Role == core.RoleHost:
+					a.hostDetail(c, d, dr, rt)
+				default:
+					a.peerDetail(c, d, dr, rt)
+				}
+			})
+		})
+	})
+}
+
+func (a *App) deviceHeader(c *myui.Context, d *core.Device, dr *drafts, rt runtime) {
+	t := c.Theme()
+	status := deviceStatus(d.Role, rt)
+
+	card := myui.Row(c).FillWidth().MinHeight(112).Radius(23).Padding(20, 22).
+		Gap(13).AlignItems(myui.Center).Shrink(0).
+		Border(1, t.Accent.Alpha(0.15)).
+		LinearGradient(myui.LinearGradient{
+			From:  t.Background.Mix(t.Accent, 0.10),
+			To:    t.Background.Mix(t.Accent, 0.035),
+			Angle: 125,
+		})
+	card.Children(func() {
+		headerTile(c, deviceIcon(d.Role))
+		myui.Column(c).Gap(4).Grow(1).MinWidth(0).Children(func() {
+			myui.Row(c).Gap(2).AlignItems(myui.Center).Children(func() {
+				const titleSize = 30
+				width, _ := c.MeasureText(0, myui.Span{Text: *dr.name, Size: titleSize, Weight: 650})
+				field := myui.TextInputBase(c, dr.name).Bind(&a.nameField).
+					Label(T("field.deviceName")).FontSize(titleSize).FontWeight(650).LetterSpacing(-0.8).
+					Width(max(36, width+3)).MaxWidth(400).MinWidth(0).Shrink(1).
+					Height(39).BorderWidth(0, 0, 1, 0).BorderColor(myui.Transparent)
+				if field.Focused() || field.Hovered() {
+					field.BorderColor(t.Border)
+				}
+				if field.Changed() {
+					a.renameDevice(d, dr, *dr.name)
+				}
+				iconButton(c, "edit", T("action.rename"), t.TextMuted).
+					OnClick(func() { a.nameField.SelectAll() })
+			})
+			myui.Row(c).Gap(9).AlignItems(myui.Center).Children(func() {
+				statusLine(c, status, 12)
+				if rt.cli != nil && rt.lat > 0 {
+					latency := rt.lat.Round(time.Millisecond).String()
+					myui.Text(c, latency).FontFeatures("tnum").FontSize(12).TextColor(t.TextMuted).
+						Tooltip(T("status.latency", "latency", latency))
+				}
+			})
 		})
 
-		if running {
-			if actionButton(c, btnQuiet, "stop", T("action.stop")).Clicked() {
-				a.stopHost(d.ID)
-			}
-		} else if !rt.busy {
-			if actionButton(c, btnSolid, "share", T("action.ticket")).Clicked() {
-				a.startHost(d.ID)
-			}
+		iconButton(c, "trash", T("action.remove"), t.TextMuted).
+			OnClick(func() { a.removeDevice(d.ID) })
+		var action myui.Element
+		switch {
+		case rt.srv != nil:
+			action = actionButton(c, btnQuiet, "stop", T("action.stop")).OnClick(func() { a.stopHost(d.ID) })
+		case rt.cli != nil:
+			action = actionButton(c, btnQuiet, "x", T("action.disconnect")).OnClick(func() { a.stopPeer(d.ID) })
+		case d.Role == core.RoleHost:
+			action = actionButton(c, btnSolid, "share", T("action.ticket")).Disabled(rt.busy).
+				OnClick(func() { a.startHost(d.ID) })
+		default:
+			action = actionButton(c, btnSolid, "connect", T("action.connect")).Disabled(rt.busy).
+				OnClick(func() { a.startPeer(d.ID) })
 		}
-		if actionButton(c, btnDanger, "trash", T("action.remove")).Clicked() {
-			a.removeDevice(d.ID)
-		}
+		action.MinHeight(42).Radius(21).Padding(9, 17)
 	})
+}
 
-	if rt.errMsg != "" {
-		notice(c, "alert", rt.errMsg, myui.Hex(colDanger))
-	}
+// hostDetail draws the share address and forwarded ports.
+func (a *App) hostDetail(c *myui.Context, d *core.Device, dr *drafts, rt runtime) {
+	dim := c.Theme().TextMuted
+	running := rt.srv != nil
 
-	// The address, once the host is up.
-	if running && addr != "" {
-		ticket := appear("ticket", panel(c, 0).Padding(18))
-		ticket.Children(func() {
-			myui.Row(c).Gap(18).Children(func() {
-				box := myui.Column(c).Padding(8).Background(myui.Hex("#FFFFFF")).
-					Radius(radControl).Shrink(0)
-				box.Children(func() {
-					if src := a.qrImage(d.ID, addr); src != nil {
-						myui.Image(c, src).Size(136, 136)
-					}
-				})
-
-				myui.Column(c).Gap(10).Grow(1).Children(func() {
-					sectionLabel(c, T("ticket.title"))
-					myui.Text(c, hardWrap(addr, 66)).Font(fontMono).FontSize(10.5).
-						TextColor(text2)
-					myui.Row(c).Height(2)
-					label := T("action.copy")
-					if time.Since(a.copiedTime()) < 2*time.Second {
-						label = T("action.copied")
-					}
-					myui.Row(c).Children(func() {
-						if actionButton(c, btnSolid, "copy", label).Clicked() {
-							_ = mygo.Clipboard.Write(transfer.TextData(addr))
-							a.markCopied()
-						}
+	if running && rt.addr != "" {
+		const qrPadding = 4
+		const gap = 16
+		src := a.qrImage(d.ID, rt.addr)
+		qrWidth, qrHeight := myui.ImageSize(src)
+		width := detailWidth(c) - 34 // card padding and border
+		if src != nil {
+			width -= qrWidth + 2*qrPadding + gap
+		}
+		card := appear("address", panel(c).Padding(16))
+		card.Children(func() {
+			myui.Row(c).FillWidth().Gap(gap).AlignItems(myui.Center).Children(func() {
+				myui.Column(c).Gap(10).Grow(1).MinWidth(0).Children(func() {
+					myui.Row(c).Gap(8).AlignItems(myui.Center).Children(func() {
+						sectionLabel(c, T("ticket.title")).Grow(1)
+						a.copyButton(c, d.ID, rt.addr, T("action.copy"), btnSolid)
 					})
+					addressValue(c, rt.addr, width)
 				})
+				if src != nil {
+					myui.Box(c).Padding(qrPadding).Radius(radControl).Shrink(0).
+						Background(myui.Hex("#FFFFFF")).Children(func() {
+						myui.Image(c, src).Size(qrWidth, qrHeight).Label(T("ticket.qr"))
+					})
+				}
 			})
 		})
 	}
 
-	// Ports.
-	ports := panel(c, 0).Padding(16).Gap(10)
-	ports.Children(func() {
-		myui.Row(c).AlignItems(myui.Center).Children(func() {
-			sectionLabel(c, T("section.ports"))
-			myui.Row(c).Grow(1)
+	panel(c).Padding(18).Gap(12).Children(func() {
+		myui.Row(c).Gap(8).AlignItems(myui.Center).Children(func() {
+			sectionLabel(c, T("section.ports")).FontSize(15).Grow(1)
 			if !running {
-				if iconButton(c, "plus", T("action.addPort"), dim).Clicked() {
-					a.addExpose(d.ID)
-				}
+				actionButton(c, btnQuiet, "plus", T("action.addPort")).
+					OnClick(func() { a.addExpose(d.ID) })
 			}
 		})
-		for j := range d.Exposes {
-			j := j
-			myui.Row(c).FillWidth().Gap(8).AlignItems(myui.Center).Children(func() {
-				iconEl(c, "hash", 15, dim)
+		for j, port := range d.Exposes {
+			myui.Row(c.Key(dr.exposes[j])).FillWidth().Gap(10).AlignItems(myui.Center).Children(func() {
+				iconEl(c, "hash", 16, dim)
 				if running {
-					myui.Text(c, d.Exposes[j]).Font(fontMono).FontSize(12.5).
-						TextColor(text2).Grow(1)
+					myui.Text(c, port).Font(fontMono).FontSize(13).Grow(1)
 					return
 				}
-				if myui.TextInput(c, dr.exposes[j]).Width(300).
-					Placeholder(T("placeholder.expose")).Changed() {
+				field := myui.TextInput(c, dr.exposes[j]).Width(360).MinWidth(0).Font(fontMono).
+					Label(T("section.ports")).Placeholder(T("placeholder.expose"))
+				if field.Changed() {
 					d.Exposes[j] = *dr.exposes[j]
 					a.persistSoon()
 				}
-				myui.Row(c).Grow(1)
 				if len(d.Exposes) > 1 {
-					if iconButton(c, "x", T("action.removeItem"), dim).Clicked() {
-						a.removeExpose(d.ID, j)
-					}
+					myui.Row(c).Grow(1)
+					iconButton(c, "x", T("action.removeItem"), dim).
+						OnClick(func() { a.removeExpose(d.ID, j) })
 				}
 			})
-		}
-		if !running {
-			myui.Row(c).Height(1).FillWidth().Background(myui.Hex(colLine))
-			switchRow(c, "key", T("opt.persistent"), &d.Persistent)
 		}
 	})
 
-	if !running {
-		opts := panel(c, 0).Padding(6, 0).Gap(1).
-			Dividers(1, myui.Hex(colLine))
-		opts.Children(func() {
-			switchRow(c, "radio", T("opt.udp"), &d.UDP)
-			switchRow(c, "globe", T("opt.allowProxy"), &d.AllowProxy)
-			switchRow(c, "terminal", T("opt.ssh"), &d.SSH)
-			if d.SSH {
-				switchRow(c, "folder", T("opt.files"), &d.Files)
-				if d.Files {
-					myui.Column(c).Gap(6).Padding(10, 36).Children(func() {
-						fieldLabel(c, T("opt.filesDir"))
-						if myui.TextInput(c, dr.files).FillWidth().
-							Placeholder(T("placeholder.filesDir")).Changed() {
-							d.FileDir = *dr.files
-							a.persistSoon()
-						}
-					})
-				}
-			}
-			myui.Column(c).Gap(6).Padding(12, 12).Children(func() {
-				fieldLabel(c, T("opt.allowedClients"))
-				if myui.TextInput(c, dr.allowed).FillWidth().
-					Placeholder(T("placeholder.allowedClients")).Changed() {
-					d.AllowedClients = splitKeys(*dr.allowed)
-					a.persistSoon()
-				}
-			})
-		})
-	}
 }
 
-// peerDetail draws the "connect to a peer" side of a device.
-func (a *App) peerDetail(c *myui.Context, d *core.Device) {
-	cream := myui.Hex(colCream)
-	text2 := myui.Hex(colText2)
-	dim := myui.Hex(colDim)
-	gold := myui.Hex(colGold)
-
-	rt := a.runtimeSnapshot(d.ID)
-	connected := rt.cli != nil
-	dr := a.deviceDrafts(d)
-	status, statusColor := a.deviceStatus(d)
-
-	// Header.
-	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
-		headerTile(c, "peer", gold)
-		myui.Column(c).Gap(6).Grow(1).Children(func() {
-			if myui.TextInputBase(c, dr.name).Font(fontUI).FontSize(22).
-				FontWeight(700).LetterSpacing(-0.4).TextColor(cream).FillWidth().MaxWidth(300).Changed() {
-				a.renameDevice(d, dr, *dr.name)
+func (a *App) hostOptions(c *myui.Context, d *core.Device, dr *drafts) {
+	formGroup(c, T("section.services"), func() {
+		switchRow(c, "key", T("opt.persistent"), &d.Persistent)
+		switchRow(c, "radio", T("opt.udp"), &d.UDP)
+		switchRow(c, "globe", T("opt.allowProxy"), &d.AllowProxy)
+		switchRow(c, "terminal", T("opt.ssh"), &d.SSH)
+		if d.SSH {
+			switchRow(c, "folder", T("opt.files"), &d.Files)
+			if d.Files {
+				myui.Column(c).Gap(6).Padding(11, 16).Children(func() {
+					label := T("opt.filesDir")
+					fieldLabel(c, label)
+					if myui.TextInput(c, dr.files).FillWidth().Label(label).
+						Placeholder(T("placeholder.filesDir")).Changed() {
+						d.FileDir = *dr.files
+						a.persistSoon()
+					}
+				})
 			}
-			myui.Row(c).Gap(10).AlignItems(myui.Center).Children(func() {
-				statusChip(c, status, statusColor)
-				if connected {
-					myui.Text(c, rt.lat.Round(time.Millisecond).String()).
-						Font(fontMono).FontSize(10.5).FontFeatures("tnum").TextColor(dim)
-				}
-			})
-		})
-
-		if connected {
-			if actionButton(c, btnQuiet, "x", T("action.disconnect")).Clicked() {
-				a.stopPeer(d.ID)
-			}
-		} else if !rt.busy {
-			if actionButton(c, btnSolid, "connect", T("action.connect")).Clicked() {
-				a.startPeer(d.ID)
-			}
-		}
-		if actionButton(c, btnDanger, "trash", T("action.remove")).Clicked() {
-			a.removeDevice(d.ID)
 		}
 	})
-
-	if rt.errMsg != "" {
-		notice(c, "alert", rt.errMsg, myui.Hex(colDanger))
-	}
-
-	// Address.
-	address := panel(c, 0).Padding(16).Gap(9)
-	address.Children(func() {
-		row := myui.Row(c).Gap(8).AlignItems(myui.Center)
-		row.Children(func() {
-			iconEl(c, "connect", 15, dim)
-			sectionLabel(c, T("section.peerAddr"))
-			myui.Row(c).Grow(1)
-			if connected {
-				if iconButton(c, "copy", T("action.copy"), dim).Clicked() {
-					_ = mygo.Clipboard.Write(transfer.TextData(d.Addr))
-					a.markCopied()
-				}
+	formGroup(c, T("section.access"), func() {
+		myui.Column(c).Gap(6).Padding(15, 16).Children(func() {
+			label := T("opt.allowedClients")
+			fieldLabel(c, label)
+			if myui.TextInput(c, dr.allowed).FillWidth().Font(fontMono).Label(label).
+				Placeholder(T("placeholder.allowedClients")).Changed() {
+				d.AllowedClients = splitKeys(*dr.allowed)
+				a.persistSoon()
 			}
 		})
+	})
+}
+
+// peerDetail draws the address, port mappings and connected tools for a peer.
+func (a *App) peerDetail(c *myui.Context, d *core.Device, dr *drafts, rt runtime) {
+	dim := c.Theme().TextMuted
+	connected := rt.cli != nil
+
+	const panelPadding = 18
+	panel(c).Padding(panelPadding).Gap(10).Children(func() {
+		label := T("section.peerAddr")
 		if connected {
-			myui.Text(c, hardWrap(d.Addr, 92)).Font(fontMono).FontSize(10.5).
-				TextColor(text2)
-		} else if myui.TextInput(c, dr.addr).FillWidth().
-			Placeholder(T("placeholder.addr")).Changed() {
+			myui.Row(c).Gap(8).AlignItems(myui.Center).Children(func() {
+				sectionLabel(c, label).Grow(1)
+				a.copyButton(c, d.ID, d.Addr, T("action.copy"), btnQuiet)
+			})
+			addressValue(c, d.Addr, detailWidth(c)-2*panelPadding-2)
+			return
+		}
+		sectionLabel(c, label)
+		if myui.TextInput(c, dr.addr).FillWidth().Font(fontMono).
+			Label(label).Placeholder(T("placeholder.addr")).Changed() {
 			d.Addr = *dr.addr
 			a.persistSoon()
 		}
 	})
 
-	// Client key, so the host can allow-list this peer.
-	if !connected {
-		if key := a.ensureClientKey(d.ID); key != "" {
-			keyCard := panel(c, 0).Padding(16).Gap(8)
-			keyCard.Children(func() {
-				myui.Row(c).AlignItems(myui.Center).Children(func() {
-					iconText(c, "key", T("peer.clientKey"), 15, 11, dim)
-					myui.Row(c).Grow(1)
-					if iconButton(c, "copy", T("action.copyKey"), dim).Clicked() {
-						_ = mygo.Clipboard.Write(transfer.TextData(key))
-						a.markCopied()
-					}
-				})
-				myui.Text(c, hardWrap(key, 64)).Font(fontMono).FontSize(10.5).
-					TextColor(text2)
-			})
-		}
-	}
-
-	// Port mapping.
-	mapping := panel(c, 0).Padding(16).Gap(10)
-	mapping.Children(func() {
-		myui.Row(c).AlignItems(myui.Center).Children(func() {
-			sectionLabel(c, T("section.mapping"))
-			myui.Row(c).Grow(1)
+	panel(c).Padding(18).Gap(12).Children(func() {
+		myui.Row(c).Gap(8).AlignItems(myui.Center).Children(func() {
+			sectionLabel(c, T("section.mapping")).FontSize(15).Grow(1)
 			if !connected {
-				if iconButton(c, "plus", T("action.addMapping"), dim).Clicked() {
-					a.addForward(d.ID)
-				}
+				actionButton(c, btnQuiet, "plus", T("action.addMapping")).
+					OnClick(func() { a.addForward(d.ID) })
 			}
 		})
-		for j := range d.Forwards {
-			j := j
-			myui.Row(c).FillWidth().Gap(8).AlignItems(myui.Center).Children(func() {
-				iconEl(c, "connect", 15, dim)
+		for j, mapping := range d.Forwards {
+			myui.Row(c.Key(dr.forwards[j])).FillWidth().Gap(10).AlignItems(myui.Center).Children(func() {
+				iconEl(c, "connect", 16, dim)
 				if connected {
-					myui.Text(c, d.Forwards[j]).Font(fontMono).FontSize(12.5).
-						TextColor(text2).Grow(1)
+					myui.Text(c, mapping).Font(fontMono).FontSize(13).Grow(1)
 					return
 				}
-				if myui.TextInput(c, dr.forwards[j]).Width(300).
-					Placeholder(T("placeholder.forward")).Changed() {
+				field := myui.TextInput(c, dr.forwards[j]).Width(360).MinWidth(0).Font(fontMono).
+					Label(T("section.mapping")).Placeholder(T("placeholder.forward"))
+				if field.Changed() {
 					d.Forwards[j] = *dr.forwards[j]
 					a.persistSoon()
 				}
-				myui.Row(c).Grow(1)
 				if len(d.Forwards) > 1 {
-					if iconButton(c, "x", T("action.removeItem"), dim).Clicked() {
-						a.removeForward(d.ID, j)
-					}
+					myui.Row(c).Grow(1)
+					iconButton(c, "x", T("action.removeItem"), dim).
+						OnClick(func() { a.removeForward(d.ID, j) })
 				}
 			})
 		}
 	})
 
-	if !connected {
-		opts := panel(c, 0).Padding(6, 0).Gap(1).
-			Dividers(1, myui.Hex(colLine))
-		opts.Children(func() {
-			switchRow(c, "radio", T("opt.udp"), &d.UDP)
-			switchRow(c, "globe", T("opt.socks"), &d.Socks)
-			if d.Socks {
-				myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(2, 38).Children(func() {
-					iconEl(c, "network", 14, dim)
-					myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(10.5).
-						TextColor(text2)
-				})
-			}
-			switchRow(c, "folder", T("opt.browse"), &d.BrowseFiles)
-			if core.TerminalAvailable() {
-				switchRow(c, "terminal", T("opt.term"), &d.Term)
-			}
-		})
+	if connected && d.BrowseFiles {
+		a.filesPanel(c, d.ID)
 	}
 
-	// Interactive terminal.
-	if connected && a.termOf(d.ID) != nil {
-		term := appear("terminal", panel(c, 0).Padding(16).Gap(10))
-		term.Children(func() {
-			iconText(c, "terminal", T("term.live"), 15, 11, dim)
+	term := a.termOf(d.ID)
+	if connected && term != nil {
+		card := appear("terminal", panel(c).Padding(14).Gap(10))
+		card.Children(func() {
+			sectionLabel(c, T("term.live"))
 			a.terminalPane(c, d.ID)
 			myui.Row(c).Gap(8).Children(func() {
-				myui.TextInput(c, dr.termCmd).Grow(1).
-					Placeholder(T("term.placeholder"))
-				if actionButton(c, btnSolid, "send", T("term.send")).Clicked() {
-					a.sendTermLine(d.ID)
-				}
+				send := func() { a.sendTermLine(d.ID) }
+				label := T("term.placeholder")
+				myui.TextInput(c, dr.termCmd).Grow(1).MinWidth(0).Font(fontMono).
+					Label(label).Placeholder(label).OnSubmit(send)
+				actionButton(c, btnSolid, "send", T("term.send")).OnClick(send)
 			})
 		})
 	}
 
-	if connected && d.BrowseFiles {
-		a.filesPanel(c, d.ID)
-	}
-	// Remote shell, when the tunnel is up and no interactive terminal runs.
-	if connected && a.termOf(d.ID) == nil {
-		shell := appear("shell", panel(c, 0).Padding(16).Gap(10))
+	if connected && term == nil {
+		shell := appear("shell", panel(c).Padding(14).Gap(10))
 		shell.Children(func() {
-			iconText(c, "terminal", T("term.title"), 15, 11, dim)
+			sectionLabel(c, T("term.title"))
 			myui.Row(c).Gap(8).Children(func() {
-				myui.TextInput(c, dr.termCmd).Grow(1).
-					Placeholder(T("term.placeholder"))
-				if actionButton(c, btnSolid, "play", T("term.run")).Clicked() {
-					a.runRemoteCommand(d.ID)
-				}
+				run := func() { a.runRemoteCommand(d.ID) }
+				label := T("term.placeholder")
+				myui.TextInput(c, dr.termCmd).Grow(1).MinWidth(0).Font(fontMono).
+					Label(label).Placeholder(label).OnSubmit(run)
+				actionButton(c, btnSolid, "play", T("term.run")).OnClick(run)
 			})
 			body := T("term.empty")
 			if rt.termOut != "" {
 				body = rt.termOut
 			}
 			myui.Column(c).FillWidth().Padding(12).Radius(radControl).
-				Background(myui.Hex(termBg)).Border(1, myui.Hex(colLine)).
+				Background(currentAppearance(c).inset).Border(1, separatorColor(c)).
 				Children(func() {
-					myui.Text(c, body).Font(fontMono).FontSize(11).
-						TextColor(text2)
+					myui.Text(c, body).Font(fontMono).FontSize(12)
 				})
 			if rt.termErr != "" {
-				notice(c, "alert", rt.termErr, myui.Hex(colDanger))
+				notice(c, "alert", rt.termErr, c.Theme().Danger)
 			}
 		})
 	}
@@ -864,11 +737,60 @@ func (a *App) peerDetail(c *myui.Context, d *core.Device) {
 		line := appear("socks", myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(0, 2))
 		line.Children(func() {
 			iconEl(c, "network", 14, dim)
-			myui.Text(c, "SOCKS5").FontSize(11.5).TextColor(dim)
-			myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(10.5).
-				TextColor(text2)
+			myui.Text(c, "SOCKS5").FontSize(12).TextColor(dim)
+			myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(12)
 		})
 	}
+}
+
+func (a *App) peerOptions(c *myui.Context, d *core.Device) {
+	dim := c.Theme().TextMuted
+	formGroup(c, T("section.services"), func() {
+		switchRow(c, "radio", T("opt.udp"), &d.UDP)
+		switchRow(c, "globe", T("opt.socks"), &d.Socks)
+		if d.Socks {
+			myui.Row(c).Gap(9).AlignItems(myui.Center).Padding(8, 40).Children(func() {
+				iconEl(c, "network", 14, dim)
+				myui.Text(c, a.socksAddr()).Font(fontMono).FontSize(12).TextColor(dim)
+			})
+		}
+		switchRow(c, "folder", T("opt.browse"), &d.BrowseFiles)
+		if core.TerminalAvailable() {
+			switchRow(c, "terminal", T("opt.term"), &d.Term)
+		}
+	})
+
+	if key := a.ensureClientKey(d.ID); key != "" {
+		const panelPadding = 18
+		formGroup(c, T("section.access"), func() {
+			myui.Column(c).FillWidth().Padding(panelPadding).Gap(10).Children(func() {
+				myui.Row(c).Gap(8).AlignItems(myui.Center).Children(func() {
+					sectionLabel(c, T("peer.clientKey")).Grow(1)
+					a.copyButton(c, d.ID, key, T("action.copyKey"), btnQuiet)
+				})
+				addressValue(c, key, detailWidth(c)-2*panelPadding-2)
+			})
+		})
+	}
+}
+
+// detailWidth is the width of the page inside the sidebar and window padding.
+func detailWidth(c *myui.Context) float32 {
+	width, _ := c.Size()
+	return min(detailMaxWidth, width-railWidth-2*detailPadding)
+}
+
+// addressValue wraps a long address or key to the available space.
+func addressValue(c *myui.Context, value string, width float32) {
+	const size = 12
+	const inset = 10
+	advance, _ := c.MeasureText(0, myui.Span{Text: "0", Font: fontMono, Size: size})
+	columns := max(1, int((width-2*inset-2)/max(advance, 1)))
+	myui.Column(c).FillWidth().Padding(8, inset).Radius(radControl).
+		Background(currentAppearance(c).inset).Border(1, separatorColor(c)).Children(func() {
+		myui.Text(c, hardWrap(value, columns)).Font(fontMono).FontSize(size).
+			TextColor(c.Theme().TextMuted)
+	})
 }
 
 // ---------------------------------------------------------------- state helpers
@@ -1007,18 +929,22 @@ func (a *App) socksAddr() string {
 	return fmt.Sprintf("127.0.0.1:%d", a.settings.SocksPort)
 }
 
-func (a *App) copiedTime() time.Time {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.copied
-}
-
-func (a *App) markCopied() {
-	a.mu.Lock()
-	a.copied = time.Now()
-	a.mu.Unlock()
-	a.refresh()
-	time.AfterFunc(2*time.Second, a.refresh)
+func (a *App) copyButton(c *myui.Context, id, value, label string, style btnStyle) {
+	const feedbackDuration = 2 * time.Second
+	feedback := a.clipboard
+	if feedback.deviceID == id && feedback.value == value && time.Since(feedback.at) < feedbackDuration {
+		message, color := T("action.copied"), c.Theme().Success
+		if feedback.failed {
+			message, color = T("action.copyFailed"), c.Theme().Danger
+		}
+		myui.Text(c, message).FontSize(12).TextColor(color).SingleLine()
+	}
+	actionButton(c, style, "copy", label).OnClick(func() {
+		err := mygo.Clipboard.Write(transfer.TextData(value))
+		a.clipboard = clipboardFeedback{deviceID: id, value: value, at: time.Now(), failed: err != nil}
+		a.refresh()
+		time.AfterFunc(feedbackDuration, a.refresh)
+	})
 }
 
 // sendTermLine sends the command field as a line to the remote shell.
@@ -1143,6 +1069,7 @@ func (a *App) addDevice(role string) {
 	d := newDevice(role, fmt.Sprintf("%s %d", name, n+1))
 	a.devices = append(a.devices, d)
 	a.sel = d.ID
+	a.showSettings = false
 	a.mu.Unlock()
 
 	a.persistNow()
@@ -1296,43 +1223,24 @@ func (a *App) removeForward(id string, j int) {
 	a.refresh()
 }
 
-// deviceStatus returns the rail label and colour for a device.
-func (a *App) deviceStatus(d *core.Device) (string, myui.Color) {
-	a.mu.Lock()
-	rt := a.rt[d.ID]
-	var errMsg string
-	var busy, srvOn, cliOn bool
-	if rt != nil {
-		errMsg = rt.errMsg
-		busy = rt.busy
-		srvOn = rt.srv != nil
-		cliOn = rt.cli != nil
+// deviceStatus returns the message key for the current state.
+func deviceStatus(role string, rt runtime) string {
+	switch {
+	case rt.errMsg != "":
+		return "state.error"
+	case rt.busy && role == core.RoleHost:
+		return "state.starting"
+	case rt.busy:
+		return "state.connecting"
+	case rt.srv != nil:
+		return "state.running"
+	case rt.cli != nil:
+		return "state.connected"
+	case role == core.RoleHost:
+		return "state.idleHost"
+	default:
+		return "state.idlePeer"
 	}
-	a.mu.Unlock()
-
-	idle := myui.Hex(colDim)
-	if rt == nil {
-		if d.Role == core.RoleHost {
-			return T("state.idleHost"), idle
-		}
-		return T("state.idlePeer"), idle
-	}
-	if errMsg != "" {
-		return T("state.error"), myui.Hex(colDanger)
-	}
-	if busy {
-		return T("state.connecting"), myui.Hex(colGold)
-	}
-	if srvOn {
-		return T("state.running"), myui.Hex(colGood)
-	}
-	if cliOn {
-		return T("state.connected"), myui.Hex(colGood)
-	}
-	if d.Role == core.RoleHost {
-		return T("state.idleHost"), idle
-	}
-	return T("state.idlePeer"), idle
 }
 
 // ---------------------------------------------------------------- connections
@@ -1637,14 +1545,15 @@ func (a *App) qrImage(id, addr string) myui.ImageSource {
 	}
 	a.mu.Unlock()
 
-	png, err := qrcode.Encode(addr, qrcode.Medium, 640)
+	code, err := qrcode.New(addr, qrcode.Medium)
 	if err != nil {
 		return nil
 	}
-	src, err := myui.DecodeImage(png)
-	if err != nil {
-		return nil
-	}
+	// Size the bitmap in whole modules so rendering at its natural size
+	// preserves the quiet zone and sharp edges at the default scale.
+	modules := len(code.Bitmap())
+	scale := max(1, min(3, 208/modules))
+	src := myui.NewBitmap(code.Image(-scale))
 
 	a.mu.Lock()
 	if rt := a.rt[id]; rt != nil {
@@ -1753,76 +1662,69 @@ func hardWrap(s string, n int) string {
 
 // settingsPane draws application-wide settings.
 func (a *App) settingsPane(c *myui.Context) {
-	cream := myui.Hex(colCream)
+	text := c.Theme().Text
 
 	a.mu.Lock()
 	st := a.settings
 	a.mu.Unlock()
 
-	// Header.
-	myui.Row(c).Gap(16).AlignItems(myui.Center).Children(func() {
-		headerTile(c, "settings", myui.Hex(colGold))
-		myui.Column(c).Gap(4).Grow(1).Children(func() {
-			myui.Text(c, T("settings.title")).Font(fontUI).FontSize(22).
-				FontWeight(700).LetterSpacing(-0.4).TextColor(cream)
-		})
-		if actionButton(c, btnQuiet, "chevron-left", T("nav.back")).Clicked() {
+	myui.Row(c).FillWidth().AlignItems(myui.Center).Gap(10).Padding(10, 0, 16).
+		Shrink(0).Children(func() {
+		iconButton(c, "chevron-left", T("nav.back"), c.Theme().TextMuted).OnClick(func() {
 			a.mu.Lock()
 			a.showSettings = false
 			a.mu.Unlock()
 			a.refresh()
-		}
+		})
+		myui.Text(c, T("settings.title")).FontSize(30).FontWeight(650).
+			LetterSpacing(-0.8).TextColor(text)
 	})
 
-	// General.
-	general := panel(c, 0).Padding(6, 0).Gap(1).
-		Dividers(1, myui.Hex(colLine))
-	general.Children(func() {
-		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(12).Children(func() {
-			iconText(c, "globe", T("settings.language"), 16, 12.5, cream).Grow(1)
-			group := myui.Row(c).Gap(2).Padding(2).Radius(8).
-				Background(myui.Hex(colRail)).Border(1, myui.Hex(colLine)).
-				Shrink(0)
-			group.Children(func() {
-				langs := []struct{ label, tag string }{
-					{T("settings.langAuto"), ""},
-					{"English", "en"},
-					{"简体中文", "zh-Hans"},
-				}
-				for _, l := range langs {
-					l := l
-					if segmentButton(c, l.label, st.Language == l.tag).Clicked() {
-						a.applyLanguage(l.tag)
-					}
-				}
+	myui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
+		myui.Column(c).FillWidth().Gap(20).Padding(10, 0, 24).Children(func() {
+			formGroup(c, T("settings.general"), func() {
+				myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 16).Gap(12).Children(func() {
+					iconText(c, "globe", T("settings.language"), 16, 13, text).Grow(1)
+					myui.Row(c).Gap(2).Padding(2).Radius(radControl).
+						Background(c.Theme().Surface).Border(1, separatorColor(c)).
+						Shrink(0).Children(func() {
+						langs := []struct{ label, tag string }{
+							{T("settings.langAuto"), ""},
+							{"English", "en"},
+							{"简体中文", "zh-Hans"},
+						}
+						for _, l := range langs {
+							segmentButton(c, l.label, st.Language == l.tag).
+								OnClick(func() { a.applyLanguage(l.tag) })
+						}
+					})
+				})
+				switchRow(c, "tray", T("settings.closeToTray"), a.closeToTrayPtr())
 			})
-		})
 
-		switchRow(c, "tray", T("settings.closeToTray"), a.closeToTrayPtr())
-
-		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
-			iconText(c, "network", T("settings.socksPort"), 16, 12.5, cream).Grow(1)
-			if myui.TextInput(c, &a.socksPortIn).Width(110).Changed() {
-				a.saveNumericSettings()
-			}
-		})
-	})
-
-	// Relay.
-	relay := panel(c, 0).Padding(6, 0).Gap(1).
-		Dividers(1, myui.Hex(colLine))
-	relay.Children(func() {
-		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
-			iconText(c, "globe", T("settings.derp"), 16, 12.5, cream).Grow(1)
-			if myui.TextInput(c, &a.derpIn).Width(330).Changed() {
-				a.saveNumericSettings()
-			}
-		})
-		myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 12).Gap(10).Children(func() {
-			iconText(c, "radio", T("settings.derpRegion"), 16, 12.5, cream).Grow(1)
-			if myui.TextInput(c, &a.derpRegionIn).Width(110).Changed() {
-				a.saveNumericSettings()
-			}
+			formGroup(c, T("settings.network"), func() {
+				myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 16).Gap(10).Children(func() {
+					label := T("settings.socksPort")
+					iconText(c, "network", label, 16, 13, text).Grow(1)
+					if myui.TextInput(c, &a.socksPortIn).Width(104).Font(fontMono).Label(label).Changed() {
+						a.saveNumericSettings()
+					}
+				})
+				myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 16).Gap(10).Children(func() {
+					label := T("settings.derp")
+					iconText(c, "globe", label, 16, 13, text).Grow(1)
+					if myui.TextInput(c, &a.derpIn).Width(330).MinWidth(0).Label(label).Changed() {
+						a.saveNumericSettings()
+					}
+				})
+				myui.Row(c).FillWidth().AlignItems(myui.Center).Padding(10, 16).Gap(10).Children(func() {
+					label := T("settings.derpRegion")
+					iconText(c, "radio", label, 16, 13, text).Grow(1)
+					if myui.TextInput(c, &a.derpRegionIn).Width(104).Font(fontMono).Label(label).Changed() {
+						a.saveNumericSettings()
+					}
+				})
+			})
 		})
 	})
 }
@@ -2018,23 +1920,20 @@ func (a *App) downloadFile(id, dir, name string) {
 
 // filesPanel draws the peer's browser for the host's shared directory.
 func (a *App) filesPanel(c *myui.Context, id string) {
-	cream := myui.Hex(colCream)
-	text2 := myui.Hex(colText2)
-	dim := myui.Hex(colDim)
-	gold := myui.Hex(colGold)
+	text := c.Theme().Text
+	dim := c.Theme().TextMuted
+	success := c.Theme().Success
 
 	rt := a.runtimeSnapshot(id)
 	b := rt.browse
 
-	card := appear("files", panel(c, 0).Padding(16).Gap(10))
+	card := appear("files", panel(c).Padding(14).Gap(8))
 	card.Children(func() {
 		myui.Row(c).AlignItems(myui.Center).Gap(9).Children(func() {
-			iconEl(c, "folder", 15, dim)
-			sectionLabel(c, T("files.title"))
-			myui.Row(c).Grow(1)
-			myui.Text(c, b.path).Font(fontMono).FontSize(10.5).
-				TextColor(text2).SingleLine()
-			if b.path != "/" {
+			sectionLabel(c, T("files.title")).Grow(1)
+			myui.Text(c, b.path).Font(fontMono).FontSize(12).MaxWidth(360).MinWidth(0).
+				TextColor(dim).SingleLine().TruncateMiddle().Tooltip(b.path)
+			if b.path != "/" && b.path != "" {
 				if iconButton(c, "chevron-up", T("files.up"), dim).Clicked() {
 					a.navigateFiles(id, path.Dir(b.path))
 				}
@@ -2052,7 +1951,7 @@ func (a *App) filesPanel(c *myui.Context, id string) {
 		case b.loading:
 			myui.Text(c, T("files.loading")).FontSize(11.5).TextColor(dim)
 		case b.errMsg != "":
-			notice(c, "alert", b.errMsg, myui.Hex(colDanger))
+			notice(c, "alert", b.errMsg, c.Theme().Danger)
 			myui.Row(c).Children(func() {
 				if actionButton(c, btnQuiet, "refresh", T("files.retry")).Clicked() {
 					a.openBrowser(id)
@@ -2061,42 +1960,35 @@ func (a *App) filesPanel(c *myui.Context, id string) {
 		case len(b.entries) == 0:
 			myui.Text(c, T("files.empty")).FontSize(11.5).TextColor(dim)
 		default:
-			for _, e := range b.entries {
-				e := e
-				row := myui.Row(c).FillWidth().Gap(9).AlignItems(myui.Center).
-					Padding(6, 8).Radius(radRow)
-				if row.Hovered() {
-					row.Background(myui.Hex(colHover))
-				}
-				row.Children(func() {
-					name := "file"
-					if e.Dir {
-						name = "folder"
+			myui.Column(c).FillWidth().Dividers(1, separatorColor(c)).Children(func() {
+				for _, e := range b.entries {
+					name := func() {
+						myui.Text(c, e.Name).FontSize(13).TextColor(text).
+							Grow(1).MinWidth(0).SingleLine().TruncateStart()
 					}
-					iconEl(c, name, 15, dim)
-					myui.Text(c, e.Name).FontSize(12).TextColor(cream).
-						Grow(1).SingleLine().TruncateStart()
 					if e.Dir {
-						iconEl(c, "chevron-right", 14, dim)
-					} else {
+						navButton(c.Key(e.Name), false).MinHeight(42).Label(e.Name).Children(func() {
+							iconEl(c, "folder", 16, dim)
+							name()
+							iconEl(c, "chevron-right", 16, dim)
+						}).OnClick(func() { a.navigateFiles(id, path.Join(b.path, e.Name)) })
+						continue
+					}
+					myui.Row(c.Key(e.Name)).FillWidth().Gap(10).AlignItems(myui.Center).
+						Padding(4, 10).Children(func() {
+						iconEl(c, "file", 16, dim)
+						name()
 						myui.Text(c, humanSize(e.Size)).Font(fontMono).
-							FontSize(10.5).FontFeatures("tnum").TextColor(dim)
-						if iconButton(c, "download", T("files.download"), dim).Clicked() {
-							a.downloadFile(id, b.path, e.Name)
-						}
-					}
-				})
-				if e.Dir {
-					row.Cursor(myui.CursorPointer)
-					row.OnClick(func() {
-						a.navigateFiles(id, path.Join(b.path, e.Name))
+							FontSize(12).FontFeatures("tnum").TextColor(dim).Shrink(0)
+						iconButton(c, "download", T("files.download", "name", e.Name), dim).
+							OnClick(func() { a.downloadFile(id, b.path, e.Name) })
 					})
 				}
-			}
+			})
 		}
 
 		if b.note != "" {
-			myui.Text(c, b.note).FontSize(11).TextColor(gold)
+			myui.Text(c, b.note).FontSize(12).TextColor(success)
 		}
 	})
 }

@@ -19,7 +19,7 @@ Three dials (set by the user: a little artistic licence is welcome):
 
 ## Hard constraints
 
-- One window, 1000×680 (minimum 880×600)
+- One window, 1000×720 (minimum 880×640)
 - English is the source language; a Simplified Chinese translation ships with it
 - The address must be readable and copyable; the QR code must scan (always on white)
 - Only MyGo native primitives: colour blocks, rounded corners, circles, hairlines, text, bitmaps
@@ -99,18 +99,14 @@ emoji or typographic glyphs.
 
 ## Current implementation
 
-The shipped interface uses candidate C's palette (deep green, cream,
-gold), now stepped into three neutral surfaces with hairlines and a soft
-shadow instead of one flat plane. The structure is a desktop tool's:
+The desktop interface uses the platform's font and follows the system's
+light or dark appearance.
 
-- a 252 px sidebar: a gold mark and wordmark, `Machines` and its rows with
-  a status dot, then the create and settings actions;
-- a detail page that starts with a 44 px icon tile, an editable machine
-  name and a status chip, with the page's primary action on the right;
-- grouped cards for ports, options, mapping, files and the terminal, each
-  with a single raised surface and a hairline between rows;
-- one gold accent for the primary action and status dots; green and red only
-  for state.
+- The inset sidebar holds the machine list, the add menu and Settings.
+- The device header keeps the machine name, state and connection action
+  together above the scrolling detail.
+- The Connection view shows addresses, ports and connected tools.
+  The Options view holds service and access settings.
 
 All icons live in `ui/icons/` and are drawn with `ui.Icon`, in the colour of
 the text beside them, so they stay sharp at any scale and work on every

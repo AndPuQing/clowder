@@ -108,7 +108,7 @@ func (a *App) rebuildTrayMenu() {
 	for _, d := range devices {
 		d := d
 		f := state[d.ID]
-		status, _ := a.deviceStatus(d)
+		status := T(deviceStatus(d.Role, a.runtimeSnapshot(d.ID)))
 
 		sub := []*mygo.MenuItem{}
 		if d.Role == core.RoleHost {
